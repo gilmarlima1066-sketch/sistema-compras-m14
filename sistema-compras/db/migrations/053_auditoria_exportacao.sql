@@ -1,0 +1,21 @@
+-- ---------------------------------------------------------------------------
+-- 053 - A auditoria ganha a acao EXPORTACAO
+--
+-- A secao 40 do PROMPT 14 manda registrar exportacoes sensiveis em auditoria, e
+-- o codigo tentava faze-lo com a acao 'SELECT'. O enum `acao_auditoria_enum` so
+-- tem INSERT, UPDATE e DELETE, entao toda exportacao de fornecedores, precos ou
+-- pedidos falhava - e falhava DEPOIS de gravar a linha em `exportacoes`, o que
+-- deixava o pior dos dois mundos: o registro do que saiu existia, e a auditoria
+-- dele nao.
+--
+-- Duas saidas eram possiveis. Usar 'INSERT' seria verdade no sentido estreito
+-- (uma linha foi inserida em `exportacoes`) e mentira no sentido que importa:
+-- quem le a auditoria procurando "que dado saiu da empresa" nao encontraria
+-- nada, porque procuraria por outra coisa. Exportar nao e alterar registro, e
+-- **levar dado para fora** - e isso merece nome proprio.
+--
+-- `ALTER TYPE ... ADD VALUE` fica sozinho nesta migration de proposito: o novo
+-- rotulo nao pode ser usado na mesma transacao em que e criado.
+-- ---------------------------------------------------------------------------
+
+ALTER TYPE acao_auditoria_enum ADD VALUE IF NOT EXISTS 'EXPORTACAO';
