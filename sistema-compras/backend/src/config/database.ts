@@ -32,15 +32,28 @@ pg.types.setTypeParser(1082, (valor) => valor);
  * passam a falar a mesma data que a aplicacao. Os `timestamptz` continuam
  * guardados em UTC - muda so a conversao na leitura, que e justamente o que se
  * quer. E `DATE` ja trafega como texto, sem conversao nenhuma.
+ *
+ * O fuso e aplicado (set_config TimeZone) assim que cada conexao abre, nao pelo
+ * parametro de inicializacao `options`: o pooler do Supabase (Supavisor) nao
+ * garante repassar esse parametro ao PostgreSQL. O ajuste vale na conexao direta
+ * e para o pooler em modo SESSAO (porta 5432). No modo TRANSACAO (porta 6543)
+ * a sessao do servidor e compartilhada entre clientes - nao use esse modo aqui.
  */
 const FUSO = process.env.TZ ?? 'America/Sao_Paulo';
+
+// `onConnect` e aguardado pelo pool antes de entregar a conexao: nenhuma
+// consulta roda com o fuso errado, e uma falha aqui falha a conexao em vez de
+// seguir em silencio.
+const aplicarFuso = async (cliente: pg.ClientBase) => {
+  await cliente.query('SELECT set_config($1, $2, false)', ['TimeZone', FUSO]);
+};
 
 export const pool = new Pool({
   connectionString: env.DATABASE_URL,
   max: env.PG_POOL_MAX,
   ssl: env.usarSsl ? { rejectUnauthorized: false } : undefined,
   application_name: 'compras-api',
-  options: `-c timezone=${FUSO}`,
+  onConnect: aplicarFuso,
 });
 
 pool.on('error', (erro) => {
@@ -64,7 +77,7 @@ export const poolLeitura = env.DATABASE_URL_LEITURA
     max: 3,
     ssl: env.usarSsl ? { rejectUnauthorized: false } : undefined,
     application_name: 'compras-ia-leitura',
-    options: `-c timezone=${FUSO}`,
+    onConnect: aplicarFuso,
   })
   : null;
 

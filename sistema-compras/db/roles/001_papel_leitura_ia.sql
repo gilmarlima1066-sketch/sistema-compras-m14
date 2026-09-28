@@ -12,6 +12,10 @@
 --
 --     psql -U postgres -d compras -f db/roles/001_papel_leitura_ia.sql
 --
+-- No Supabase: rode este arquivo no SQL Editor (usuario postgres), depois de
+-- trocar a senha abaixo. O usuario de conexao pelo pooler fica
+-- `compras_ia.<ref-do-projeto>`.
+--
 -- Depois, configure no backend:
 --
 --     DATABASE_URL_LEITURA=postgres://compras_ia:<senha>@host:5432/compras
@@ -46,7 +50,10 @@ ALTER ROLE compras_ia SET statement_timeout = '10s';
 ALTER ROLE compras_ia SET idle_in_transaction_session_timeout = '15s';
 
 -- 4. Leitura, e so leitura, no schema public.
-GRANT CONNECT ON DATABASE compras TO compras_ia;
+-- O nome do banco varia (`compras` local, `postgres` no Supabase).
+DO $$ BEGIN
+  EXECUTE format('GRANT CONNECT ON DATABASE %I TO compras_ia', current_database());
+END $$;
 GRANT USAGE   ON SCHEMA public    TO compras_ia;
 GRANT SELECT  ON ALL TABLES    IN SCHEMA public TO compras_ia;
 GRANT SELECT  ON ALL SEQUENCES IN SCHEMA public TO compras_ia;
@@ -71,6 +78,15 @@ REVOKE SELECT ON ia_execucoes FROM compras_ia;
 
 --    E nada de criar objeto no schema.
 REVOKE CREATE ON SCHEMA public FROM compras_ia;
+
+--    Com RLS ligado (migration 057), quem nao e dono precisa de politica de
+--    leitura. A funcao cria `leitura_ia` em cada tabela; o REVOKE acima
+--    continua valendo, porque politica filtra linhas e nao concede privilegio.
+DO $$ BEGIN
+  IF to_regproc('public.aplicar_seguranca_supabase') IS NOT NULL THEN
+    PERFORM public.aplicar_seguranca_supabase();
+  END IF;
+END $$;
 
 -- 6. Conferencia. Deve devolver zero linha.
 --

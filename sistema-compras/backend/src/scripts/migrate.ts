@@ -71,6 +71,15 @@ export async function migrar(): Promise<{ aplicadas: string[]; jaAplicadas: stri
     }
   }
 
+  // Tabelas criadas por migrations futuras nascem sem RLS e, no Supabase, com
+  // acesso concedido a API publica (anon). A 057 deixou a correcao pronta numa
+  // funcao; reaplica-la a cada execucao fecha essa porta sem depender de cada
+  // migration nova lembrar. E idempotente e barata.
+  const { rows: protecao } = await pool.query<{ existe: boolean }>(
+    "SELECT to_regproc('public.aplicar_seguranca_supabase') IS NOT NULL AS existe",
+  );
+  if (protecao[0]?.existe) await pool.query('SELECT public.aplicar_seguranca_supabase()');
+
   return { aplicadas, jaAplicadas };
 }
 

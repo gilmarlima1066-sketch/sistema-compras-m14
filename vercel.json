@@ -1,0 +1,6 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": null,
+  "installCommand": "npm ci --prefix sistema-compras/backend && npm ci --prefix sistema-compras/frontend",
+  "buildCommand": "node sistema-compras/scripts/vercel-build.mjs"
+}
