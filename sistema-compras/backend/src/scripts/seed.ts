@@ -4,7 +4,7 @@
  */
 import { readFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { pool, encerrarPool } from '../config/database.js';
 import { env } from '../config/env.js';
 import { gerarHashSenha } from '../modules/auth/auth.service.js';
@@ -43,7 +43,9 @@ export async function semear() {
   }
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+// Ver comentario equivalente em migrate.ts: pathToFileURL funciona tambem no
+// Windows, onde `file://${process.argv[1]}` nunca bate com import.meta.url.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   console.log('Carregando seeds...');
   semear()
     .then(() => console.log('\nSeed concluido.'))

@@ -8,7 +8,7 @@
 import { createHash } from 'node:crypto';
 import { readdir, readFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { pool, encerrarPool } from '../config/database.js';
 
 const PASTA_MIGRATIONS = join(dirname(fileURLToPath(import.meta.url)), '../../../db/migrations');
@@ -83,7 +83,11 @@ export async function migrar(): Promise<{ aplicadas: string[]; jaAplicadas: stri
   return { aplicadas, jaAplicadas };
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+// Comparacao por URL (nao por string crua): no Windows, process.argv[1] vem
+// com barra invertida e letra de unidade ("C:\..."), que `file://${...}`
+// nunca bate com import.meta.url ("file:///C:/..."). pathToFileURL normaliza
+// os dois formatos da mesma forma nos dois sistemas.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   console.log('Executando migrations...');
   migrar()
     .then(({ aplicadas, jaAplicadas }) => {
