@@ -342,7 +342,15 @@ function Importar() {
 
     try {
       const buffer = await arquivoSelecionado.arrayBuffer();
-      const wb = XLSX.read(buffer, { type: 'array', raw: false, dateNF: 'DD/MM/YYYY' });
+      const ext = arquivoSelecionado.name.split('.').pop()?.toLowerCase() ?? '';
+      const isBinary = ext === 'xlsx' || ext === 'xls';
+
+      // CSV/TXT deve ser decodificado como texto; binarios (xlsx/xls) como array.
+      const wb = isBinary
+        ? XLSX.read(buffer, { type: 'array', raw: false, dateNF: 'DD/MM/YYYY' })
+        : XLSX.read(new TextDecoder().decode(buffer), { type: 'string', raw: false, dateNF: 'DD/MM/YYYY' });
+
+      if (!wb.SheetNames.length) throw new Error('O arquivo nao contem planilhas validas');
       const planilha = wb.Sheets[wb.SheetNames[0]!];
       if (!planilha) throw new Error('Planilha vazia ou invalida');
 
