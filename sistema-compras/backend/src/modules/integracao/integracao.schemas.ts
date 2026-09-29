@@ -288,6 +288,23 @@ export const cancelarSchema = z.object({
   motivo: texto(3, 500),
 });
 
+export const iniciarClientSchema = z.object({
+  nome_arquivo: texto(3, 255),
+  entidade: texto(2, 60),
+  colunas: z.array(z.string().trim().max(120)).min(1).max(500),
+  amostra: z.array(z.record(z.unknown())).max(500),
+  total_linhas: z.coerce.number().int().min(1),
+  template: texto(2, 60).optional().nullable(),
+  integracao: texto(2, 60).optional().nullable(),
+});
+
+export const processarLoteSchema = z.object({
+  lote: z.coerce.number().int().min(0),
+  total_lotes: z.coerce.number().int().min(1),
+  linhas: z.array(z.record(z.unknown())).min(1).max(10000),
+  is_last: z.coerce.boolean(),
+});
+
 // ---------------------------------------------------------------------------
 // Conciliacao (secao 34)
 // ---------------------------------------------------------------------------

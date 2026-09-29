@@ -18,6 +18,7 @@
  * importador economize.
  */
 import { useCallback, useEffect, useState } from 'react';
+import * as XLSX from 'xlsx';
 import { api, ErroApi } from '../api/client';
 import { useAuth } from '../auth/AuthContext';
 import { CabecalhoPagina } from '../componentes/Cabecalho';
@@ -278,12 +279,16 @@ function Central() {
 
 // ---------------------------------------------------------------------------
 
+const TAMANHO_LOTE = 8000;
+const AMOSTRA_LINHAS = 100;
+
 function Importar() {
   const [entidades, setEntidades] = useState<string[]>([]);
   const [templates, setTemplates] = useState<any[]>([]);
   const [importacoes, setImportacoes] = useState<any[]>([]);
   const [entidade, setEntidade] = useState('');
   const [arquivoSelecionado, setArquivoSelecionado] = useState<File | null>(null);
+  const [linhasParsed, setLinhasParsed] = useState<Array<Record<string, unknown>>>([]);
   const [analise, setAnalise] = useState<any>(null);
   const [template, setTemplate] = useState('');
   const [validacao, setValidacao] = useState<any>(null);
@@ -325,48 +330,54 @@ function Importar() {
   };
 
   /**
-   * Envia o arquivo via multipart e devolve a analise.
-   * Usa fetch direto porque o cliente padrao espera JSON, nao FormData.
+   * Le o arquivo no browser com SheetJS, envia apenas cabecalho + amostra ao
+   * backend e guarda todas as linhas em estado para o processamento em lotes.
+   * Contorna o limite de 4.5 MB da Vercel: o arquivo nunca sobe por inteiro.
    */
-  const enviarArquivo = async (): Promise<any> => {
-    if (!arquivoSelecionado || !entidade) return null;
+  const analisar = async () => {
+    if (!arquivoSelecionado || !entidade) return;
+    setValidacao(null); setResultado(null); setAnalise(null); setErro(null);
     setOcupado(true);
-    setErro(null);
-    setProgresso('Enviando arquivo...');
-    try {
-      const form = new FormData();
-      form.append('arquivo', arquivoSelecionado);
-      form.append('entidade', entidade);
+    setProgresso('Lendo arquivo...');
 
-      const jwt = localStorage.getItem('compras.token') ?? '';
-      const resposta = await fetch('/api/integracoes/importacoes/upload', {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${jwt}` },
-        body: form,
+    try {
+      const buffer = await arquivoSelecionado.arrayBuffer();
+      const wb = XLSX.read(buffer, { type: 'array', raw: false, dateNF: 'DD/MM/YYYY' });
+      const planilha = wb.Sheets[wb.SheetNames[0]!];
+      if (!planilha) throw new Error('Planilha vazia ou invalida');
+
+      const linhas = XLSX.utils.sheet_to_json<Record<string, unknown>>(planilha, {
+        defval: '',
+        raw: false,
+        dateNF: 'DD/MM/YYYY',
       });
 
-      const json = await resposta.json().catch(() => null);
-      if (!resposta.ok) {
-        const msg = json?.error?.message ?? `Falha ${resposta.status}`;
-        throw new Error(msg);
-      }
-      return json?.data ?? null;
+      if (!linhas.length) throw new Error('Nenhuma linha encontrada no arquivo');
+
+      const colunas = Object.keys(linhas[0]!);
+      const amostra = linhas.slice(0, AMOSTRA_LINHAS);
+      setLinhasParsed(linhas);
+
+      setProgresso('Analisando estrutura...');
+      const { data } = await api<any>('/integracoes/importacoes/iniciar-client', {
+        metodo: 'POST',
+        corpo: {
+          nome_arquivo: arquivoSelecionado.name,
+          entidade,
+          colunas,
+          amostra,
+          total_linhas: linhas.length,
+        },
+      });
+
+      setAnalise(data);
+      const sugerido = templates.find((t) => t.entidade === entidade);
+      setTemplate(sugerido?.codigo ?? '');
     } catch (e) {
-      setErro(e instanceof Error ? e.message : 'Falha ao enviar o arquivo');
-      return null;
+      setErro(e instanceof Error ? e.message : 'Falha ao ler o arquivo');
     } finally {
       setOcupado(false);
       setProgresso(null);
-    }
-  };
-
-  const analisar = async () => {
-    setValidacao(null); setResultado(null); setAnalise(null);
-    const d = await enviarArquivo();
-    if (d) {
-      setAnalise(d);
-      const sugerido = templates.find((t) => t.entidade === entidade);
-      setTemplate(sugerido?.codigo ?? '');
     }
   };
 
@@ -381,15 +392,68 @@ function Importar() {
     if (d) setValidacao(d);
   };
 
+  /**
+   * Confirma e processa em lotes: cada lote tem ate TAMANHO_LOTE linhas
+   * (ca. 3 MB JSON), garantindo que cada requisicao fique abaixo do limite
+   * da Vercel. O backend grava cada lote imediatamente via o gravador da
+   * entidade; o progresso e exibido linha a linha.
+   */
   const gravar = async () => {
     const c = await passo<any>(`/integracoes/importacoes/${analise.importacao_id}/confirmar`);
     if (!c) return;
-    const d = await passo<any>(`/integracoes/importacoes/${analise.importacao_id}/processar`);
-    if (d) { setResultado(d); await carregar(); }
+
+    const totalLotes = Math.ceil(linhasParsed.length / TAMANHO_LOTE);
+    setOcupado(true);
+    setErro(null);
+
+    try {
+      const jwt = localStorage.getItem('compras.token') ?? '';
+      let ultimoResultado: any = null;
+
+      for (let lote = 0; lote < totalLotes; lote++) {
+        const inicio = lote * TAMANHO_LOTE;
+        const fim = Math.min(inicio + TAMANHO_LOTE, linhasParsed.length);
+        const linhsLote = linhasParsed.slice(inicio, fim);
+        const isLast = lote === totalLotes - 1;
+
+        setProgresso(
+          `Gravando lote ${lote + 1} de ${totalLotes} `
+          + `(${numero(fim)} de ${numero(linhasParsed.length)} linhas)...`
+        );
+
+        const resp = await fetch(
+          `/api/integracoes/importacoes/${analise.importacao_id}/processar-lote`,
+          {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${jwt}`,
+            },
+            body: JSON.stringify({ lote, total_lotes: totalLotes, linhas: linhsLote, is_last: isLast }),
+          },
+        );
+
+        const json = await resp.json().catch(() => null);
+        if (!resp.ok) {
+          throw new Error(json?.error?.message ?? `Falha no lote ${lote + 1}: ${resp.status}`);
+        }
+
+        if (isLast) ultimoResultado = json?.data ?? null;
+      }
+
+      setResultado(ultimoResultado);
+      await carregar();
+    } catch (e) {
+      setErro(e instanceof Error ? e.message : 'Falha ao processar os lotes');
+    } finally {
+      setOcupado(false);
+      setProgresso(null);
+    }
   };
 
   const resetar = () => {
     setArquivoSelecionado(null);
+    setLinhasParsed([]);
     setAnalise(null);
     setValidacao(null);
     setResultado(null);
@@ -411,9 +475,10 @@ function Importar() {
 
       <Cartao titulo="Nova importacao de planilha de vendas">
         <p className="fraco">
-          Selecione um arquivo XLSX ou CSV exportado do ERP. O formato e detectado
-          pelo conteudo — nao pela extensao. Nada e gravado no banco antes da
-          confirmacao na etapa de pre-visualizacao.
+          Selecione um arquivo XLSX ou CSV exportado do ERP. O arquivo e lido
+          diretamente no navegador — arquivos grandes (ate 800 mil linhas) sao
+          enviados em lotes e nao encontram o limite de tamanho da Vercel.
+          Nada e gravado no banco antes da confirmacao.
         </p>
 
         <div className="filtros" style={{ alignItems: 'flex-end' }}>
@@ -432,6 +497,7 @@ function Importar() {
                 onChange={(e) => {
                   const f = e.target.files?.[0] ?? null;
                   setArquivoSelecionado(f);
+                  setLinhasParsed([]);
                   setAnalise(null);
                   setValidacao(null);
                   setResultado(null);
@@ -443,6 +509,7 @@ function Importar() {
             {nomeArquivo && (
               <span className="fraco" style={{ fontSize: '0.75rem' }}>
                 {nomeArquivo} ({tamanhoArquivo})
+                {linhasParsed.length > 0 && ` · ${numero(linhasParsed.length)} linhas`}
               </span>
             )}
           </div>
@@ -460,7 +527,7 @@ function Importar() {
             disabled={ocupado || !arquivoSelecionado || !entidade}
             onClick={analisar}
           >
-            {ocupado ? 'Enviando...' : 'Enviar e analisar'}
+            {ocupado ? 'Processando...' : 'Ler e analisar'}
           </button>
 
           {(analise || erro) && (
@@ -472,7 +539,7 @@ function Importar() {
       </Cartao>
 
       {analise && (
-        <Cartao titulo={`Importacao ${analise.importacao_id} — ${analise.formato}`}>
+        <Cartao titulo={`Importacao ${analise.importacao_id} — ${numero(analise.total_estimado ?? linhasParsed.length)} linhas`}>
           {analise.ja_importado && (
             <Aviso>
               Este arquivo ja foi importado em {dataHora(analise.ja_importado.em)}
@@ -501,7 +568,7 @@ function Importar() {
             </button>
             <button type="button" className="botao botao--pequeno"
               disabled={ocupado || !analise.casamento} onClick={validar}>
-              Validar
+              Validar amostra
             </button>
           </div>
 
@@ -522,7 +589,7 @@ function Importar() {
           {(analise.sugestoes ?? []).length > 0 && !analise.casamento && (
             <>
               <p className="fraco">
-                Sugestao automatica (secao 12) — confira antes de salvar como modelo:
+                Sugestao automatica — confira antes de salvar como modelo:
               </p>
               <table className="tabela">
                 <thead><tr><th>Coluna</th><th>Campo sugerido</th><th>Confianca</th></tr></thead>
@@ -546,16 +613,23 @@ function Importar() {
 
       {validacao && (
         <Cartao titulo="Pre-visualizacao e validacao">
+          {validacao.truncado && (
+            <Aviso>
+              Validacao baseada em amostra de {numero(validacao.validas + validacao.com_erro)} linhas.
+              O arquivo completo ({numero(validacao.total_linhas)} linhas) sera processado em lotes
+              apos a confirmacao.
+            </Aviso>
+          )}
           <div className="grade-indicadores">
-            <Indicador rotulo="Linhas validas" valor={numero(validacao.validas)}
+            <Indicador rotulo="Validas (amostra)" valor={numero(validacao.validas)}
               tom="acento" />
-            <Indicador rotulo="Com erro" valor={numero(validacao.com_erro)}
+            <Indicador rotulo="Com erro (amostra)" valor={numero(validacao.com_erro)}
               tom={validacao.com_erro > 0 ? 'perigo' : 'neutro'}
               nota="Nao serao gravadas" />
-            <Indicador rotulo="Com alerta" valor={numero(validacao.com_alerta)}
+            <Indicador rotulo="Com alerta (amostra)" valor={numero(validacao.com_alerta)}
               tom={validacao.com_alerta > 0 ? 'alerta' : 'neutro'}
               nota="Serao gravadas, com ressalva" />
-            <Indicador rotulo="Total de linhas" valor={numero(validacao.total_linhas)} />
+            <Indicador rotulo="Total no arquivo" valor={numero(validacao.total_linhas)} />
           </div>
 
           {(validacao.ocorrencias_por_regra ?? []).length > 0 && (
@@ -578,11 +652,12 @@ function Importar() {
           )}
 
           <p className="fraco">
-            Confirmar grava {numero(validacao.validas)} registro(s). Registro ja
-            existente e atualizado, nunca duplicado.
+            Confirmar inicia o processamento de {numero(linhasParsed.length)} linhas
+            em {Math.ceil(linhasParsed.length / TAMANHO_LOTE)} lotes.
+            Registros existentes sao atualizados, nunca duplicados.
           </p>
           <button type="button" className="botao botao--primario"
-            disabled={ocupado || validacao.validas === 0} onClick={gravar}>
+            disabled={ocupado} onClick={gravar}>
             Confirmar e gravar
           </button>
         </Cartao>

@@ -47,11 +47,11 @@ import {
   configuracaoSchema, credencialSchema, criarIntegracaoSchema,
   decidirConciliacaoSchema, emailSchema, enviarSchema, errosSchema,
   execucoesSchema, exportarSchema, historicoExportacoesSchema, idParam,
-  importarSchema, listarConciliacoesSchema, listarEmailsSchema,
+  importarSchema, iniciarClientSchema, listarConciliacoesSchema, listarEmailsSchema,
   listarImportacoesSchema, mapearImportacaoSchema, mensagensSchema,
-  ocorrenciasSchema, periodoSchema, resolverErroSchema, rotacionarSchema,
-  sincronizarSchema, solicitacaoCotacaoSchema, sugerirSchema, templateSchema,
-  testarSchema,
+  ocorrenciasSchema, periodoSchema, processarLoteSchema, resolverErroSchema,
+  rotacionarSchema, sincronizarSchema, solicitacaoCotacaoSchema, sugerirSchema,
+  templateSchema, testarSchema,
 } from './integracao.schemas.js';
 
 const LER = exigirPermissao('integracao.ler');
@@ -467,6 +467,26 @@ integracaoRouter.post(
   }),
 );
 
+/**
+ * Importacao iniciada pelo navegador (SheetJS).
+ *
+ * Recebe cabecalho + amostra (ja parseados no browser) e cria o registro.
+ * As linhas chegam depois via /processar-lote, em pedacos de ate 8 mil linhas.
+ * Isso contorna o limite de 4.5 MB que a Vercel aplica a funcoes serverless.
+ */
+integracaoRouter.post('/importacoes/iniciar-client', IMPORTAR, rota(async (req, res) => {
+  const e = validarEntrada(req, 'body', iniciarClientSchema);
+  criado(res, await importacao.iniciarImportacaoClient({
+    nome_arquivo: e.nome_arquivo,
+    entidade: e.entidade,
+    colunas: e.colunas,
+    amostra: e.amostra as Record<string, unknown>[],
+    total_linhas: e.total_linhas,
+    template: e.template ?? null,
+    integracao: e.integracao ?? null,
+  }, contexto(req)));
+}));
+
 integracaoRouter.get('/importacoes', LER, rota(async (req, res) => {
   ok(res, await importacao.listar(validarEntrada(req, 'query', listarImportacoesSchema)));
 }));
@@ -530,6 +550,27 @@ integracaoRouter.post('/importacoes/:id/cancelar', IMPORTAR, rota(async (req, re
   const { motivo } = validarEntrada(req, 'body', cancelarSchema);
   await importacao.cancelar(id, motivo);
   ok(res, { id }, 'Importacao cancelada');
+}));
+
+/**
+ * Processa um lote de linhas enviado pelo navegador.
+ *
+ * Cada lote chega com ate 8 mil linhas (ca. 3 MB JSON), ja parseadas pelo
+ * SheetJS no browser. O backend valida e grava imediatamente via o gravador
+ * registrado para a entidade. O estado entre lotes (documentos limpos, id da
+ * execucao, contadores) fica em `importacoes.resumo` durante o processamento.
+ */
+integracaoRouter.post('/importacoes/:id/processar-lote', IMPORTAR, rota(async (req, res) => {
+  const { id } = validarEntrada(req, 'params', idParam);
+  const e = validarEntrada(req, 'body', processarLoteSchema);
+  ok(res, await importacao.processarLoteClient(
+    id,
+    e.lote,
+    e.total_lotes,
+    e.linhas as Array<Record<string, unknown>>,
+    e.is_last,
+    contexto(req),
+  ));
 }));
 
 // ===========================================================================

@@ -283,6 +283,11 @@ export async function validar(importacaoId: number): Promise<Validacao> {
     throw regraNegocio('Defina o mapeamento antes de validar');
   }
 
+  // Importacao iniciada pelo navegador: sem arquivo em disco, valida a amostra.
+  if (!imp.caminho) {
+    return validarAmostra(imp, importacaoId);
+  }
+
   const template = await mapeador.obterTemplate(Number(imp.template_id));
   const formato = String(imp.formato) as leitor.Formato;
   const caminho = String(imp.caminho);
@@ -465,6 +470,11 @@ export async function processar(
     throw regraNegocio(
       'A importacao precisa ser confirmada antes de processar (secao 11). '
       + 'Reveja a pre-visualizacao e confirme.');
+  }
+  if (!imp.caminho) {
+    throw regraNegocio(
+      'Esta importacao foi iniciada pelo navegador. Use o endpoint '
+      + '/processar-lote para enviar os dados em lotes.');
   }
 
   const gravador = GRAVADORES[String(imp.entidade)];
@@ -836,3 +846,360 @@ export async function descartarArquivo(importacaoId: number): Promise<boolean> {
 }
 
 export { pool as poolImportacao, comTransacao as transacaoImportacao };
+
+// ---------------------------------------------------------------------------
+// Importacao iniciada pelo navegador (sem upload de arquivo)
+// ---------------------------------------------------------------------------
+
+export interface EntradaImportacaoClient {
+  nome_arquivo: string;
+  entidade: string;
+  colunas: string[];
+  amostra: Record<string, unknown>[];
+  total_linhas: number;
+  template?: string | null;
+  integracao?: string | null;
+}
+
+/**
+ * Cria o registro de importacao a partir de dados ja parseados no navegador.
+ *
+ * Usado quando o arquivo e grande demais para o limite de corpo da Vercel
+ * (4.5 MB). O navegador le e serializa a planilha com SheetJS, envia
+ * cabecalho + amostra aqui para analise, e depois processa as linhas em lotes
+ * via `processarLoteClient`. Nenhum arquivo chega ao servidor.
+ */
+export async function iniciarImportacaoClient(
+  entrada: EntradaImportacaoClient,
+  contexto: ContextoSessao,
+): Promise<Analise> {
+  const { createHash } = await import('node:crypto');
+  const hashBase = entrada.nome_arquivo + '|' + JSON.stringify(entrada.amostra.slice(0, 3));
+  const hash = createHash('sha256').update(hashBase).digest('hex');
+
+  const { rows: anterior } = await query<{
+    id: string; created_at: string; registros_criados: number; status: string;
+  }>(`SELECT id, created_at, registros_criados, status::text AS status
+        FROM importacoes
+       WHERE hash_arquivo = $1
+         AND status IN ('CONCLUIDA', 'CONCLUIDA_COM_ERROS')
+       ORDER BY id DESC LIMIT 1`, [hash]);
+
+  const maxLinhas = await configNumero('importacao_max_linhas', 1_000_000);
+  if (entrada.total_linhas > maxLinhas) {
+    throw regraNegocio(
+      `O arquivo tem ${entrada.total_linhas} linhas, acima do limite de ${maxLinhas}`);
+  }
+
+  const impedimentos: string[] = [];
+  if (!entrada.colunas.length) {
+    impedimentos.push('Nenhuma coluna encontrada no arquivo.');
+  }
+
+  let template: mapeador.Template | null = null;
+  let casamento: mapeador.Casamento | null = null;
+
+  if (entrada.template) {
+    template = await mapeador.obterTemplate(entrada.template);
+    if (template.entidade !== entrada.entidade) {
+      impedimentos.push(
+        `O template ${template.codigo} e da entidade "${template.entidade}" e a `
+        + `importacao pediu "${entrada.entidade}".`);
+    }
+    casamento = mapeador.casarColunas(template, entrada.colunas);
+    for (const campo of casamento.obrigatorios_ausentes) {
+      impedimentos.push(
+        `A coluna obrigatoria "${campo}" nao existe no arquivo.`);
+    }
+  }
+
+  const { rows } = await query<{ id: string }>(`
+    INSERT INTO importacoes
+      (nome_arquivo, formato, entidade, origem, caminho, hash_arquivo,
+       template_id, linha_cabecalho, colunas_detectadas, amostra, status,
+       total_linhas, usuario_id, integracao_id, analisado_em)
+    VALUES ($1, 'CSV'::formato_arquivo_enum, $2, 'CSV'::origem_registro_enum, NULL, $3,
+            $4, 1, $5::jsonb, $6::jsonb, $7::status_importacao_enum, $8, $9,
+            (SELECT id FROM integracoes WHERE upper(codigo) = upper($10)), now())
+    RETURNING id`,
+  [entrada.nome_arquivo, entrada.entidade, hash,
+    template?.id ?? null,
+    JSON.stringify(entrada.colunas), JSON.stringify(entrada.amostra),
+    impedimentos.length ? 'REJEITADA'
+      : template ? 'AGUARDANDO_CONFIRMACAO' : 'AGUARDANDO_MAPEAMENTO',
+    entrada.total_linhas, contexto.usuarioId ?? null, entrada.integracao ?? null]);
+
+  const importacaoId = Number(rows[0]!.id);
+
+  if (impedimentos.length) {
+    await query('UPDATE importacoes SET erro = $2 WHERE id = $1',
+      [importacaoId, impedimentos.join(' ')]);
+  }
+
+  return {
+    importacao_id: importacaoId,
+    status: impedimentos.length ? 'REJEITADA'
+      : template ? 'AGUARDANDO_CONFIRMACAO' : 'AGUARDANDO_MAPEAMENTO',
+    formato: 'CSV',
+    colunas: entrada.colunas,
+    total_estimado: entrada.total_linhas,
+    ...(casamento ? {
+      casamento: {
+        encontradas: Object.fromEntries(casamento.encontradas),
+        faltando: casamento.faltando,
+        desconhecidas: casamento.desconhecidas,
+        obrigatorios_ausentes: casamento.obrigatorios_ausentes,
+      },
+    } : {
+      sugestoes: mapeador.sugerirMapeamento(entrada.colunas),
+    }),
+    amostra: entrada.amostra,
+    ...(anterior.length ? {
+      ja_importado: {
+        importacao_id: Number(anterior[0]!.id),
+        em: anterior[0]!.created_at,
+        registros: anterior[0]!.registros_criados,
+      },
+    } : {}),
+    impedimentos,
+  };
+}
+
+/**
+ * Valida a amostra armazenada (importacoes.amostra) em vez do arquivo completo.
+ *
+ * Chamado por `validar()` quando `caminho IS NULL`: o arquivo nao existe no
+ * servidor, mas a amostra enviada durante `iniciarImportacaoClient` basta para
+ * confirmar que o mapeamento faz sentido. O total real vem de `total_linhas`.
+ */
+async function validarAmostra(
+  imp: Record<string, unknown>,
+  importacaoId: number,
+): Promise<Validacao> {
+  const template = await mapeador.obterTemplate(Number(imp.template_id));
+  const colunas = (imp.colunas_detectadas as string[]) ?? [];
+  const casamento = mapeador.casarColunas(template, colunas);
+  const amostra = (imp.amostra as Record<string, unknown>[]) ?? [];
+
+  await query("UPDATE importacoes SET status = 'VALIDANDO' WHERE id = $1", [importacaoId]);
+  await query('DELETE FROM importacao_ocorrencias WHERE importacao_id = $1', [importacaoId]);
+
+  const inicio = Date.now();
+  let validas = 0;
+  let comErro = 0;
+  let comAlerta = 0;
+  const porRegra = new Map<string, { severidade: string; total: number; exemplo: string }>();
+  const previa: Validacao['previa'] = [];
+
+  for (let i = 0; i < amostra.length; i++) {
+    const resultado = mapeador.aplicarLinha(template, casamento, amostra[i]!);
+    if (resultado.valido) validas += 1; else comErro += 1;
+    const temAlerta = resultado.ocorrencias.some((o) => o.severidade === 'ALERTA');
+    if (temAlerta) comAlerta += 1;
+
+    for (const o of resultado.ocorrencias) {
+      const chave = `${o.severidade}|${o.regra}|${o.campo ?? o.coluna ?? ''}`;
+      const atual = porRegra.get(chave);
+      if (atual) { atual.total += 1; }
+      else { porRegra.set(chave, { severidade: o.severidade, total: 1, exemplo: `linha ${i + 2}: ${o.mensagem}` }); }
+    }
+    if (previa.length < 20) {
+      previa.push({ linha: i + 2, dados: resultado.dados, valido: resultado.valido });
+    }
+  }
+
+  const totalLinhas = Number(imp.total_linhas) || amostra.length;
+  const duracao = Date.now() - inicio;
+
+  await query(`
+    UPDATE importacoes
+       SET status = 'AGUARDANDO_CONFIRMACAO', mapeamento = $2::jsonb, resumo = $3::jsonb
+     WHERE id = $1`,
+  [importacaoId,
+    JSON.stringify(Object.fromEntries(casamento.encontradas)),
+    JSON.stringify({
+      duracao_validacao_ms: duracao,
+      amostra_validada: true,
+      linhas_amostra: amostra.length,
+      colunas_desconhecidas: casamento.desconhecidas,
+      colunas_faltando: casamento.faltando,
+    })]);
+
+  return {
+    importacao_id: importacaoId,
+    total_linhas: totalLinhas,
+    validas,
+    com_erro: comErro,
+    com_alerta: comAlerta,
+    truncado: true,
+    duracao_ms: duracao,
+    ocorrencias_por_regra: [...porRegra.entries()]
+      .map(([chave, v]) => ({
+        regra: chave.split('|').slice(1).join(' '),
+        severidade: v.severidade,
+        total: v.total,
+        exemplo: v.exemplo,
+      }))
+      .sort((a, b) => b.total - a.total)
+      .slice(0, 50),
+    previa,
+  };
+}
+
+/**
+ * Processa um lote de linhas ja parseadas pelo navegador.
+ *
+ * O navegador envia os dados em lotes de ate 8 mil linhas (ca. 3 MB JSON).
+ * Cada lote e validado e gravado imediatamente; o estado entre lotes (quais
+ * documentos ja tiveram os itens limpos, o id da execucao) vive em
+ * `importacoes.resumo` enquanto o processamento esta em andamento.
+ */
+export async function processarLoteClient(
+  importacaoId: number,
+  lote: number,
+  totalLotes: number,
+  linhas: Array<Record<string, unknown>>,
+  isLast: boolean,
+  contexto: ContextoSessao,
+): Promise<{
+  lote: number;
+  criados: number;
+  atualizados: number;
+  descartados: number;
+  rejeitados: number;
+  concluida: boolean;
+  importacao_id: number;
+  status?: StatusImportacao;
+  total_linhas?: number;
+}> {
+  const imp = await obter(importacaoId);
+
+  if (!imp.confirmado_em) {
+    throw regraNegocio('Confirme a importacao antes de processar');
+  }
+  if (!imp.template_id) {
+    throw regraNegocio('Defina o mapeamento antes de processar');
+  }
+
+  const gravador = GRAVADORES[String(imp.entidade)];
+  if (!gravador) {
+    throw regraNegocio(
+      `Nao ha gravador para a entidade "${imp.entidade}". `
+      + `Disponiveis: ${entidadesSuportadas().join(', ') || '(nenhum)'}`);
+  }
+
+  const template = await mapeador.obterTemplate(Number(imp.template_id));
+  const colunas = (imp.colunas_detectadas as string[]) ?? [];
+  const casamento = mapeador.casarColunas(template, colunas);
+  const resumo = (imp.resumo as Record<string, unknown>) ?? {};
+
+  let execucaoId: number;
+  if (lote === 0) {
+    await query("UPDATE importacoes SET status = 'PROCESSANDO' WHERE id = $1", [importacaoId]);
+    const { rows: execRows } = await query<{ id: string }>(`
+      INSERT INTO integracao_execucoes
+        (integracao_id, integracao_codigo, tipo, direcao, entidade, modo,
+         disparado_por, usuario_id)
+      VALUES ($1, (SELECT codigo FROM integracoes WHERE id = $1), 'IMPORTACAO',
+              'ENTRADA', $2, 'MANUAL', $3, $4)
+      RETURNING id`,
+    [imp.integracao_id ?? null, imp.entidade,
+      `IMPORTACAO:${importacaoId}`, contexto.usuarioId ?? null]);
+    execucaoId = Number(execRows[0]!.id);
+  } else {
+    execucaoId = Number((resumo as Record<string, number>)._execucao_id) || 0;
+  }
+
+  const estadoRaw = (resumo._estado ?? {}) as Record<string, unknown>;
+  const estado: EstadoImportacao = new Map(Object.entries(estadoRaw));
+
+  let criados = 0;
+  let atualizados = 0;
+  let descartados = 0;
+  let rejeitados = 0;
+  const loteGravar: Array<{ linha: number; dados: Record<string, unknown> }> = [];
+  const linhaBase = lote * linhas.length;
+
+  for (let i = 0; i < linhas.length; i++) {
+    const resultado = mapeador.aplicarLinha(template, casamento, linhas[i]!);
+    if (resultado.valido) {
+      loteGravar.push({ linha: linhaBase + i + 2, dados: resultado.dados });
+    } else {
+      rejeitados += 1;
+    }
+  }
+
+  if (loteGravar.length > 0) {
+    const r = await gravador(loteGravar, contexto, estado);
+    criados += r.criados;
+    atualizados += r.atualizados;
+    descartados += r.descartados;
+    rejeitados += r.rejeitados;
+  }
+
+  const novoCriados = Number(resumo._criados ?? 0) + criados;
+  const novoAtualizados = Number(resumo._atualizados ?? 0) + atualizados;
+  const novoDescartados = Number(resumo._descartados ?? 0) + descartados;
+  const novoRejeitados = Number(resumo._rejeitados ?? 0) + rejeitados;
+  const novoTotal = Number(resumo._total ?? 0) + linhas.length;
+
+  await query(`
+    UPDATE importacoes
+       SET resumo = coalesce(resumo, '{}'::jsonb) || $2::jsonb
+     WHERE id = $1`,
+  [importacaoId, JSON.stringify({
+    _execucao_id: execucaoId,
+    _estado: Object.fromEntries(estado),
+    _criados: novoCriados,
+    _atualizados: novoAtualizados,
+    _descartados: novoDescartados,
+    _rejeitados: novoRejeitados,
+    _total: novoTotal,
+  })]);
+
+  if (!isLast) {
+    return {
+      lote, criados, atualizados, descartados, rejeitados,
+      concluida: false, importacao_id: importacaoId,
+    };
+  }
+
+  const comErros = novoRejeitados > 0;
+  await query(`
+    UPDATE importacoes
+       SET status = $2::status_importacao_enum,
+           total_linhas = $3, registros_criados = $4, registros_atualizados = $5,
+           registros_descartados = $6, linhas_com_erro = $7,
+           concluido_em = now(), execucao_id = $8
+     WHERE id = $1`,
+  [importacaoId,
+    comErros ? 'CONCLUIDA_COM_ERROS' : 'CONCLUIDA',
+    novoTotal, novoCriados, novoAtualizados, novoDescartados, novoRejeitados, execucaoId]);
+
+  await query(`
+    UPDATE integracao_execucoes
+       SET status = $2::status_execucao_integracao_enum, concluido_em = now(),
+           registros_lidos = $3, registros_criados = $4, registros_atualizados = $5,
+           registros_descartados = $6, registros_rejeitados = $7
+     WHERE id = $1`,
+  [execucaoId,
+    comErros ? 'CONCLUIDA_COM_ERROS' : 'CONCLUIDA',
+    novoTotal, novoCriados, novoAtualizados, novoDescartados, novoRejeitados]);
+
+  if (comErros) {
+    await avisarErros(
+      importacaoId, String(imp.nome_arquivo), novoRejeitados, novoTotal, contexto);
+  }
+
+  return {
+    lote,
+    criados: novoCriados,
+    atualizados: novoAtualizados,
+    descartados: novoDescartados,
+    rejeitados: novoRejeitados,
+    concluida: true,
+    importacao_id: importacaoId,
+    status: comErros ? 'CONCLUIDA_COM_ERROS' : 'CONCLUIDA',
+    total_linhas: novoTotal,
+  };
+}
