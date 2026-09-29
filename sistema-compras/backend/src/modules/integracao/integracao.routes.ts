@@ -17,6 +17,9 @@
  * para quem for manter.
  */
 import { Router } from 'express';
+import { mkdirSync } from 'node:fs';
+import { extname } from 'node:path';
+import multer from 'multer';
 import { z } from 'zod';
 import { ok, criado, rota } from '../../core/http.js';
 import { regraNegocio, semPermissao } from '../../core/errors.js';
@@ -59,6 +62,37 @@ const IMPORTAR = exigirPermissao('integracao.importar');
 const EXPORTAR = exigirPermissao('integracao.exportar');
 const REPROCESSAR = exigirPermissao('integracao.reprocessar');
 const CONCILIAR = exigirPermissao('integracao.conciliar');
+
+// ---------------------------------------------------------------------------
+// Upload de arquivo (multipart/form-data)
+// ---------------------------------------------------------------------------
+
+const UPLOAD_DIR = (process.env.IMPORTACAO_DIRETORIOS ?? '/mnt/user-data/uploads:/tmp/importacoes')
+  .split(':').map((d) => d.trim()).filter(Boolean).at(-1) ?? '/tmp/importacoes';
+
+// Garante que o diretorio existe sem falhar se ja existir.
+try { mkdirSync(UPLOAD_DIR, { recursive: true }); } catch { /* ok */ }
+
+const EXTENSOES_PERMITIDAS = new Set(['.xlsx', '.xls', '.csv', '.txt']);
+
+const uploadMiddleware = multer({
+  storage: multer.diskStorage({
+    destination: (_req, _file, cb) => cb(null, UPLOAD_DIR),
+    filename: (_req, file, cb) => {
+      const ext = extname(file.originalname).toLowerCase();
+      cb(null, `import-${Date.now()}-${Math.random().toString(36).slice(2, 8)}${ext}`);
+    },
+  }),
+  limits: { fileSize: 100 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    const ext = extname(file.originalname).toLowerCase();
+    if (EXTENSOES_PERMITIDAS.has(ext)) {
+      cb(null, true);
+    } else {
+      cb(new Error(`Extensao "${ext}" nao e XLSX nem CSV`));
+    }
+  },
+});
 
 interface Req {
   usuario?: { id: number; perfil?: string; permissoes?: string[] };
@@ -387,6 +421,51 @@ integracaoRouter.post('/templates/sugerir', LER, rota(async (req, res) => {
 // ===========================================================================
 // Importacao (secoes 11 a 14)
 // ===========================================================================
+
+/**
+ * Upload direto do navegador: o usuario seleciona o arquivo, o servidor salva
+ * em disco e executa a analise. A resposta e identica a do POST /importacoes,
+ * para que a tela possa usar o mesmo fluxo de mapeamento -> validacao -> gravar.
+ *
+ * O limite de 100 MB e maior do que o json middleware (1 MB), mas continua
+ * razoavel: um XLSX de 426 mil linhas ocupa entre 20 e 60 MB em disco.
+ */
+integracaoRouter.post(
+  '/importacoes/upload',
+  autenticar,
+  IMPORTAR,
+  (req, res, next) => {
+    uploadMiddleware.single('arquivo')(req, res, (err) => {
+      if (err) {
+        res.status(400).json({
+          success: false,
+          error: { code: 'UPLOAD_ERROR', message: (err as Error).message ?? 'Falha no upload', details: [] },
+        });
+        return;
+      }
+      next();
+    });
+  },
+  rota(async (req, res) => {
+    const arquivo = (req as unknown as { file?: Express.Multer.File }).file;
+    if (!arquivo) {
+      throw regraNegocio('Nenhum arquivo recebido (campo esperado: "arquivo")');
+    }
+
+    const entidade = (req.body as Record<string, string>).entidade ?? '';
+    if (!entidade) {
+      throw regraNegocio('Informe a entidade da importacao (ex.: vendas, produtos)');
+    }
+
+    criado(res, await importacao.analisar({
+      caminho: arquivo.path,
+      nome_arquivo: arquivo.originalname,
+      entidade,
+      template: (req.body as Record<string, string>).template || null,
+      integracao: (req.body as Record<string, string>).integracao || null,
+    }, contexto(req)));
+  }),
+);
 
 integracaoRouter.get('/importacoes', LER, rota(async (req, res) => {
   ok(res, await importacao.listar(validarEntrada(req, 'query', listarImportacoesSchema)));

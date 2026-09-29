@@ -282,13 +282,15 @@ function Importar() {
   const [entidades, setEntidades] = useState<string[]>([]);
   const [templates, setTemplates] = useState<any[]>([]);
   const [importacoes, setImportacoes] = useState<any[]>([]);
-  const [form, setForm] = useState({ caminho: '', nome_arquivo: '', entidade: '' });
+  const [entidade, setEntidade] = useState('');
+  const [arquivoSelecionado, setArquivoSelecionado] = useState<File | null>(null);
   const [analise, setAnalise] = useState<any>(null);
   const [template, setTemplate] = useState('');
   const [validacao, setValidacao] = useState<any>(null);
   const [resultado, setResultado] = useState<any>(null);
   const [erro, setErro] = useState<string | null>(null);
   const [ocupado, setOcupado] = useState(false);
+  const [progresso, setProgresso] = useState<string | null>(null);
 
   const carregar = useCallback(async () => {
     try {
@@ -322,14 +324,48 @@ function Importar() {
     }
   };
 
+  /**
+   * Envia o arquivo via multipart e devolve a analise.
+   * Usa fetch direto porque o cliente padrao espera JSON, nao FormData.
+   */
+  const enviarArquivo = async (): Promise<any> => {
+    if (!arquivoSelecionado || !entidade) return null;
+    setOcupado(true);
+    setErro(null);
+    setProgresso('Enviando arquivo...');
+    try {
+      const form = new FormData();
+      form.append('arquivo', arquivoSelecionado);
+      form.append('entidade', entidade);
+
+      const jwt = localStorage.getItem('compras.token') ?? '';
+      const resposta = await fetch('/api/integracoes/importacoes/upload', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${jwt}` },
+        body: form,
+      });
+
+      const json = await resposta.json().catch(() => null);
+      if (!resposta.ok) {
+        const msg = json?.error?.message ?? `Falha ${resposta.status}`;
+        throw new Error(msg);
+      }
+      return json?.data ?? null;
+    } catch (e) {
+      setErro(e instanceof Error ? e.message : 'Falha ao enviar o arquivo');
+      return null;
+    } finally {
+      setOcupado(false);
+      setProgresso(null);
+    }
+  };
+
   const analisar = async () => {
-    setValidacao(null); setResultado(null);
-    const d = await passo<any>('/integracoes/importacoes', {
-      ...form, nome_arquivo: form.nome_arquivo || form.caminho.split('/').pop(),
-    });
+    setValidacao(null); setResultado(null); setAnalise(null);
+    const d = await enviarArquivo();
     if (d) {
       setAnalise(d);
-      const sugerido = templates.find((t) => t.entidade === form.entidade);
+      const sugerido = templates.find((t) => t.entidade === entidade);
       setTemplate(sugerido?.codigo ?? '');
     }
   };
@@ -352,27 +388,86 @@ function Importar() {
     if (d) { setResultado(d); await carregar(); }
   };
 
+  const resetar = () => {
+    setArquivoSelecionado(null);
+    setAnalise(null);
+    setValidacao(null);
+    setResultado(null);
+    setErro(null);
+    setTemplate('');
+  };
+
+  const nomeArquivo = arquivoSelecionado?.name;
+  const tamanhoArquivo = arquivoSelecionado
+    ? arquivoSelecionado.size < 1024 * 1024
+      ? `${(arquivoSelecionado.size / 1024).toFixed(0)} KB`
+      : `${(arquivoSelecionado.size / 1024 / 1024).toFixed(1)} MB`
+    : null;
+
   return (
     <>
       {erro && <Aviso>{erro}</Aviso>}
+      {progresso && <p className="fraco">{progresso}</p>}
 
-      <Cartao titulo="Nova importacao">
+      <Cartao titulo="Nova importacao de planilha de vendas">
         <p className="fraco">
-          XLSX ou CSV. O formato e reconhecido pelo conteudo do arquivo, nao pela
-          extensao do nome. Nada e gravado antes da confirmacao.
+          Selecione um arquivo XLSX ou CSV exportado do ERP. O formato e detectado
+          pelo conteudo — nao pela extensao. Nada e gravado no banco antes da
+          confirmacao na etapa de pre-visualizacao.
         </p>
-        <div className="filtros">
-          <Entrada rotulo="Caminho do arquivo no servidor" valor={form.caminho}
-            aoMudar={(v) => setForm({ ...form, caminho: v })}
-            placeholder="/mnt/user-data/uploads/relatorio.xlsx" />
-          <Selecao rotulo="Entidade" valor={form.entidade}
-            aoMudar={(v) => setForm({ ...form, entidade: v })}
-            opcoes={entidades.map((e) => ({ valor: e, texto: e }))} />
-          <button type="button" className="botao botao--primario"
-            disabled={ocupado || !form.caminho || !form.entidade}
-            onClick={analisar}>
-            Analisar
+
+        <div className="filtros" style={{ alignItems: 'flex-end' }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem' }}>
+            <label className="rotulo" style={{ fontSize: '0.75rem', color: 'var(--cor-texto-fraco)' }}>
+              Arquivo (XLSX ou CSV)
+            </label>
+            <label
+              className="botao"
+              style={{ cursor: 'pointer', display: 'inline-block', marginBottom: 0 }}
+            >
+              <input
+                type="file"
+                accept=".xlsx,.xls,.csv,.txt"
+                style={{ display: 'none' }}
+                onChange={(e) => {
+                  const f = e.target.files?.[0] ?? null;
+                  setArquivoSelecionado(f);
+                  setAnalise(null);
+                  setValidacao(null);
+                  setResultado(null);
+                  setErro(null);
+                }}
+              />
+              {nomeArquivo ? 'Trocar arquivo' : 'Selecionar arquivo'}
+            </label>
+            {nomeArquivo && (
+              <span className="fraco" style={{ fontSize: '0.75rem' }}>
+                {nomeArquivo} ({tamanhoArquivo})
+              </span>
+            )}
+          </div>
+
+          <Selecao
+            rotulo="Tipo de dados"
+            valor={entidade}
+            aoMudar={(v) => { setEntidade(v); setAnalise(null); setValidacao(null); setResultado(null); }}
+            opcoes={entidades.map((e) => ({ valor: e, texto: e }))}
+          />
+
+          <button
+            type="button"
+            className="botao botao--primario"
+            disabled={ocupado || !arquivoSelecionado || !entidade}
+            onClick={analisar}
+          >
+            {ocupado ? 'Enviando...' : 'Enviar e analisar'}
           </button>
+
+          {(analise || erro) && (
+            <button type="button" className="botao botao--fantasma" onClick={resetar}>
+              Nova importacao
+            </button>
+          )}
         </div>
       </Cartao>
 
