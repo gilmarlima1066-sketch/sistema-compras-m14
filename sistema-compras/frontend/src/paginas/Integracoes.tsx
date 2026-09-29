@@ -341,14 +341,11 @@ function Importar() {
     setProgresso('Lendo arquivo...');
 
     try {
-      const buffer = await arquivoSelecionado.arrayBuffer();
-      const ext = arquivoSelecionado.name.split('.').pop()?.toLowerCase() ?? '';
-      const isBinary = ext === 'xlsx' || ext === 'xls';
-
-      // CSV/TXT deve ser decodificado como texto; binarios (xlsx/xls) como array.
-      const wb = isBinary
-        ? XLSX.read(buffer, { type: 'array', raw: false, dateNF: 'DD/MM/YYYY' })
-        : XLSX.read(new TextDecoder().decode(buffer), { type: 'string', raw: false, dateNF: 'DD/MM/YYYY' });
+      const ab = await arquivoSelecionado.arrayBuffer();
+      // XLSX.read no browser requer Uint8Array (nao ArrayBuffer) com type:'array'.
+      // O SheetJS detecta o formato pelos magic bytes; CSV/TXT sao detectados
+      // automaticamente quando nao ha magic bytes de ZIP/BIFF.
+      const wb = XLSX.read(new Uint8Array(ab), { type: 'array', raw: false, dateNF: 'DD/MM/YYYY' });
 
       if (!wb.SheetNames.length) throw new Error('O arquivo nao contem planilhas validas');
       const planilha = wb.Sheets[wb.SheetNames[0]!];
