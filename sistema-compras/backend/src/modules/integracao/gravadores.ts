@@ -499,6 +499,167 @@ const gravarPrecos = async (
 };
 
 // ===========================================================================
+// ESTOQUE — o saldo do ERP (Rel 9054)
+// ===========================================================================
+
+const LOCAL_ERP = 'ERP';
+
+/** O Rel 9054 traz "00005"; o cadastro, vindo do Rel 7104, guarda "5". */
+const normalizarCodigo = (codigo: string): string =>
+  /^\d+$/.test(codigo) ? codigo.replace(/^0+(?=\d)/, '') : codigo;
+
+const arredondar = (n: number): number => Math.round(n * 1000) / 1000;
+
+/**
+ * O ERP e a fonte da verdade do saldo, mas a razao de estoque e somente
+ * insercao: o saldo nunca e sobrescrito. A diferenca entre o que o ERP diz e o
+ * que o sistema tem vira uma movimentacao INVENTARIO, e a trigger da razao
+ * atualiza `estoques`. Reimportar o mesmo arquivo nao gera movimento.
+ *
+ * Escrita em conjunto (unnest), nao linha a linha: o relatorio tem ~4.500
+ * produtos e a funcao da Vercel tem 60 segundos.
+ */
+const gravarEstoque = async (
+  lote: Linha[], contexto: ContextoSessao, _estado: EstadoImportacao,
+): Promise<Saida> => {
+  const saida: Saida = {
+    criados: 0, atualizados: 0, descartados: 0, rejeitados: 0, motivos: new Map(),
+  };
+
+  const entradas = new Map<string, { fisico: number; reservado: number }>();
+  for (const { dados } of lote) {
+    const bruto = txt(dados['produto.codigo']);
+    if (!bruto) {
+      saida.rejeitados += 1;
+      conta(saida.motivos, 'linha sem codigo de produto');
+      continue;
+    }
+    const fisico = num(dados['estoque.quantidade_fisica']);
+    if (fisico === null) {
+      saida.rejeitados += 1;
+      conta(saida.motivos, 'saldo (QTDE) ausente ou invalido');
+      continue;
+    }
+    if (fisico < 0) conta(saida.motivos, 'saldo negativo no ERP gravado como zero');
+
+    // A planilha de gestao faz QTDE - |QTDEVENDIDA|: o sinal nao importa.
+    entradas.set(normalizarCodigo(bruto.toUpperCase()), {
+      fisico: arredondar(Math.max(fisico, 0)),
+      reservado: arredondar(Math.abs(num(dados['estoque.quantidade_reservada']) ?? 0)),
+    });
+  }
+
+  if (!entradas.size) return saida;
+
+  const cliente = await pool.connect();
+  try {
+    await cliente.query('BEGIN');
+    if (contexto.usuarioId) {
+      await cliente.query('SELECT set_config($1, $2, true)',
+        ['app.usuario_id', String(contexto.usuarioId)]);
+    }
+
+    const { rows: local } = await cliente.query<{ id: string }>(
+      'SELECT id FROM locais WHERE upper(codigo) = $1 AND ativo', [LOCAL_ERP]);
+    if (!local.length) {
+      throw new Error(
+        `Local de estoque "${LOCAL_ERP}" nao cadastrado. Aplique a migration 058 `
+        + '(npm run db:migrate).');
+    }
+    const localId = Number(local[0]!.id);
+
+    const { rows: atuais } = await cliente.query<{
+      codigo: string; produto_id: string | null;
+      fisico: string | null; reservado: string | null;
+    }>(`
+      SELECT e.codigo, p.id AS produto_id,
+             s.quantidade_fisica AS fisico, s.quantidade_reservada AS reservado
+        FROM unnest($1::text[]) AS e(codigo)
+        LEFT JOIN produtos p ON upper(p.codigo) = e.codigo AND p.deleted_at IS NULL
+        LEFT JOIN estoques s ON s.produto_id = p.id AND s.local_id = $2`,
+    [[...entradas.keys()], localId]);
+
+    const movProdutos: number[] = [];
+    const movQuantidades: number[] = [];
+    const resProdutos: number[] = [];
+    const resQuantidades: number[] = [];
+
+    for (const r of atuais) {
+      const e = entradas.get(r.codigo)!;
+      const semSaldo = e.fisico === 0 && e.reservado === 0;
+
+      if (!r.produto_id) {
+        // Produto zerado que nunca vendeu nao interessa ao planejamento; so
+        // e erro quando o ERP tem saldo de algo que o sistema desconhece.
+        if (semSaldo) {
+          saida.descartados += 1;
+          conta(saida.motivos, 'produto fora do cadastro e sem saldo');
+        } else {
+          saida.rejeitados += 1;
+          conta(saida.motivos, 'produto com saldo no ERP e nao cadastrado no sistema');
+        }
+        continue;
+      }
+
+      const existe = r.fisico !== null;
+      const diferenca = arredondar(e.fisico - Number(r.fisico ?? 0));
+      const reservaMudou = e.reservado !== Number(r.reservado ?? 0);
+
+      if (!existe && semSaldo) {
+        saida.descartados += 1;
+        conta(saida.motivos, 'sem saldo no ERP');
+        continue;
+      }
+      if (existe && diferenca === 0 && !reservaMudou) {
+        saida.descartados += 1;
+        conta(saida.motivos, 'saldo igual ao ja registrado');
+        continue;
+      }
+
+      const produtoId = Number(r.produto_id);
+      if (diferenca !== 0) {
+        movProdutos.push(produtoId);
+        movQuantidades.push(diferenca);
+      }
+      resProdutos.push(produtoId);
+      resQuantidades.push(e.reservado);
+      if (existe) saida.atualizados += 1; else saida.criados += 1;
+    }
+
+    if (movProdutos.length) {
+      await cliente.query(`
+        INSERT INTO movimentacoes_estoque
+          (produto_id, local_id, tipo_movimentacao, quantidade, documento_tipo,
+           observacao, usuario_id)
+        SELECT m.produto_id, $3, 'INVENTARIO', m.quantidade, 'INVENTARIO',
+               'Carga de saldo do ERP (Rel 9054)', $4
+          FROM unnest($1::bigint[], $2::numeric[]) AS m(produto_id, quantidade)`,
+      [movProdutos, movQuantidades, localId, contexto.usuarioId ?? null]);
+    }
+
+    if (resProdutos.length) {
+      await cliente.query(`
+        INSERT INTO estoques (produto_id, local_id, quantidade_reservada)
+        SELECT r.produto_id, $3, r.reservado
+          FROM unnest($1::bigint[], $2::numeric[]) AS r(produto_id, reservado)
+        ON CONFLICT (produto_id, local_id) DO UPDATE
+          SET quantidade_reservada = EXCLUDED.quantidade_reservada,
+              updated_at = now()`,
+      [resProdutos, resQuantidades, localId]);
+    }
+
+    await cliente.query('COMMIT');
+  } catch (erro) {
+    await cliente.query('ROLLBACK');
+    throw erro;
+  } finally {
+    cliente.release();
+  }
+
+  return saida;
+};
+
+// ===========================================================================
 // Registro
 // ===========================================================================
 
@@ -506,5 +667,6 @@ registrarGravador('vendas', gravarVendas);
 registrarGravador('produtos', gravarProdutos);
 registrarGravador('fornecedores', gravarFornecedores);
 registrarGravador('produto_fornecedor', gravarPrecos);
+registrarGravador('estoque', gravarEstoque);
 
-export { gravarVendas, gravarProdutos, gravarFornecedores, gravarPrecos };
+export { gravarVendas, gravarProdutos, gravarFornecedores, gravarPrecos, gravarEstoque };

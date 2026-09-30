@@ -282,6 +282,26 @@ function Central() {
 const TAMANHO_LOTE = 8000;
 const AMOSTRA_LINHAS = 100;
 
+/**
+ * XLSX (zip) e XLS binario (OLE) sao lidos como bytes. O resto e texto: CSV e
+ * o ".xls" do ERP, que na verdade e uma tabela HTML em Windows-1252. Texto e
+ * lido com raw para preservar zeros a esquerda e codigos de barras longos.
+ */
+function lerPastaDeTrabalho(bytes: Uint8Array): XLSX.WorkBook {
+  const zip = bytes[0] === 0x50 && bytes[1] === 0x4b;
+  const ole = bytes[0] === 0xd0 && bytes[1] === 0xcf;
+  if (zip || ole) {
+    return XLSX.read(bytes, { type: 'array', raw: false, dateNF: 'DD/MM/YYYY' });
+  }
+  let texto: string;
+  try {
+    texto = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+  } catch {
+    texto = new TextDecoder('windows-1252').decode(bytes);
+  }
+  return XLSX.read(texto, { type: 'string', raw: true });
+}
+
 function Importar() {
   const [entidades, setEntidades] = useState<string[]>([]);
   const [templates, setTemplates] = useState<any[]>([]);
@@ -341,11 +361,7 @@ function Importar() {
     setProgresso('Lendo arquivo...');
 
     try {
-      const ab = await arquivoSelecionado.arrayBuffer();
-      // XLSX.read no browser requer Uint8Array (nao ArrayBuffer) com type:'array'.
-      // O SheetJS detecta o formato pelos magic bytes; CSV/TXT sao detectados
-      // automaticamente quando nao ha magic bytes de ZIP/BIFF.
-      const wb = XLSX.read(new Uint8Array(ab), { type: 'array', raw: false, dateNF: 'DD/MM/YYYY' });
+      const wb = lerPastaDeTrabalho(new Uint8Array(await arquivoSelecionado.arrayBuffer()));
 
       if (!wb.SheetNames.length) throw new Error('O arquivo nao contem planilhas validas');
       const planilha = wb.Sheets[wb.SheetNames[0]!];
@@ -677,6 +693,13 @@ function Importar() {
             <Aviso tipo="ok">
               Historico de vendas atualizado. Os dados ja aparecem na aba Demanda
               (dashboard, analise por produto, previsao e sazonalidade).
+            </Aviso>
+          )}
+          {entidade === 'estoque' && (
+            <Aviso tipo="ok">
+              Saldo de estoque do ERP atualizado no local "ERP". O planejamento de
+              compras ja usa o novo saldo; cada diferenca ficou registrada como
+              movimentacao de inventario.
             </Aviso>
           )}
           <div className="grade-indicadores">
