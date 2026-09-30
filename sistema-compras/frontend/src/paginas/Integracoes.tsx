@@ -364,6 +364,9 @@ function Importar() {
       setLinhasParsed(linhas);
 
       setProgresso('Analisando estrutura...');
+      // Passa o template automaticamente quando existe um para a entidade
+      // (ex.: REL7104_VENDAS para vendas): elimina o passo manual de mapeamento.
+      const sugerido = templates.find((t) => t.entidade === entidade);
       const { data } = await api<any>('/integracoes/importacoes/iniciar-client', {
         metodo: 'POST',
         corpo: {
@@ -372,11 +375,11 @@ function Importar() {
           colunas,
           amostra,
           total_linhas: linhas.length,
+          template: sugerido?.codigo ?? null,
         },
       });
 
       setAnalise(data);
-      const sugerido = templates.find((t) => t.entidade === entidade);
       setTemplate(sugerido?.codigo ?? '');
     } catch (e) {
       setErro(e instanceof Error ? e.message : 'Falha ao ler o arquivo');
@@ -670,6 +673,12 @@ function Importar() {
 
       {resultado && (
         <Cartao titulo="Resultado">
+          {entidade === 'vendas' && (
+            <Aviso tipo="ok">
+              Historico de vendas atualizado. Os dados ja aparecem na aba Demanda
+              (dashboard, analise por produto, previsao e sazonalidade).
+            </Aviso>
+          )}
           <div className="grade-indicadores">
             <Indicador rotulo="Criados" valor={numero(resultado.criados)} tom="acento" />
             <Indicador rotulo="Atualizados" valor={numero(resultado.atualizados)} />

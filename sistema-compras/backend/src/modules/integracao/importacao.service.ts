@@ -1186,6 +1186,14 @@ export async function processarLoteClient(
     comErros ? 'CONCLUIDA_COM_ERROS' : 'CONCLUIDA',
     novoTotal, novoCriados, novoAtualizados, novoDescartados, novoRejeitados]);
 
+  // Importacao de vendas precisa atualizar as views materializadas de demanda
+  // para que o modulo de Demanda (historico, dashboard, previsao) enxergue os
+  // novos registros imediatamente. CONCURRENTLY nao bloqueia leituras.
+  if (String(imp.entidade) === 'vendas') {
+    await query('REFRESH MATERIALIZED VIEW CONCURRENTLY mv_demanda_diaria');
+    await query('REFRESH MATERIALIZED VIEW CONCURRENTLY mv_demanda_mensal');
+  }
+
   if (comErros) {
     await avisarErros(
       importacaoId, String(imp.nome_arquivo), novoRejeitados, novoTotal, contexto);
