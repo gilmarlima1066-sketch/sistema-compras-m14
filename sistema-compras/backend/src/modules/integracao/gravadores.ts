@@ -503,6 +503,16 @@ const gravarPrecos = async (
 // ===========================================================================
 
 const LOCAL_ERP = 'ERP';
+const CATEGORIA_A_CLASSIFICAR = 'A CLASSIFICAR (ERP)';
+
+interface EntradaEstoque {
+  fisico: number;
+  reservado: number;
+  descricao: string | null;
+  ean: string | null;
+  unidade: string | null;
+  ativo: boolean;
+}
 
 /** O Rel 9054 traz "00005"; o cadastro, vindo do Rel 7104, guarda "5". */
 const normalizarCodigo = (codigo: string): string =>
@@ -518,6 +528,11 @@ const arredondar = (n: number): number => Math.round(n * 1000) / 1000;
  *
  * Escrita em conjunto (unnest), nao linha a linha: o relatorio tem ~4.500
  * produtos e a funcao da Vercel tem 60 segundos.
+ *
+ * Excecao deliberada a regra 2 do topo do arquivo: o Rel 9054 e a lista de
+ * produtos do proprio ERP, nao uma referencia digitada. Produto que ainda nao
+ * vendeu e cadastrado aqui (categoria "A CLASSIFICAR"), para que a primeira
+ * venda ja o encontre.
  */
 const gravarEstoque = async (
   lote: Linha[], contexto: ContextoSessao, _estado: EstadoImportacao,
@@ -526,7 +541,7 @@ const gravarEstoque = async (
     criados: 0, atualizados: 0, descartados: 0, rejeitados: 0, motivos: new Map(),
   };
 
-  const entradas = new Map<string, { fisico: number; reservado: number }>();
+  const entradas = new Map<string, EntradaEstoque>();
   for (const { dados } of lote) {
     const bruto = txt(dados['produto.codigo']);
     if (!bruto) {
@@ -543,9 +558,14 @@ const gravarEstoque = async (
     if (fisico < 0) conta(saida.motivos, 'saldo negativo no ERP gravado como zero');
 
     // A planilha de gestao faz QTDE - |QTDEVENDIDA|: o sinal nao importa.
+    const situacao = txt(dados['produto.situacao']);
     entradas.set(normalizarCodigo(bruto.toUpperCase()), {
       fisico: arredondar(Math.max(fisico, 0)),
       reservado: arredondar(Math.abs(num(dados['estoque.quantidade_reservada']) ?? 0)),
+      descricao: txt(dados['produto.descricao']),
+      ean: txt(dados['produto.ean']),
+      unidade: txt(dados['produto.unidade'])?.toUpperCase() ?? null,
+      ativo: situacao === null || situacao.toUpperCase() === 'ATIVO',
     });
   }
 
@@ -567,6 +587,12 @@ const gravarEstoque = async (
         + '(npm run db:migrate).');
     }
     const localId = Number(local[0]!.id);
+
+    const cadastrados = await cadastrarProdutosDoErp(cliente, entradas);
+    if (cadastrados > 0) {
+      conta(saida.motivos, `produto cadastrado a partir do ERP (categoria ${CATEGORIA_A_CLASSIFICAR})`,
+        cadastrados);
+    }
 
     const { rows: atuais } = await cliente.query<{
       codigo: string; produto_id: string | null;
@@ -658,6 +684,76 @@ const gravarEstoque = async (
 
   return saida;
 };
+
+/**
+ * Cadastra os produtos do lote que ainda nao existem. Devolve quantos criou.
+ *
+ * EAN e opcional: invalido, repetido no lote ou ja usado por outro produto
+ * fica de fora, porque `uq_produtos_ean` derrubaria a transacao inteira.
+ */
+async function cadastrarProdutosDoErp(
+  cliente: PoolClient, entradas: Map<string, EntradaEstoque>,
+): Promise<number> {
+  const { rows: faltando } = await cliente.query<{ codigo: string }>(`
+    SELECT e.codigo
+      FROM unnest($1::text[]) AS e(codigo)
+     WHERE NOT EXISTS (
+       SELECT 1 FROM produtos p
+        WHERE upper(p.codigo) = e.codigo AND p.deleted_at IS NULL)`,
+  [[...entradas.keys()]]);
+
+  if (!faltando.length) return 0;
+
+  const { rows: categoria } = await cliente.query<{ id: string }>(
+    'SELECT id FROM categorias WHERE nome = $1', [CATEGORIA_A_CLASSIFICAR]);
+  if (!categoria.length) {
+    throw new Error(
+      `Categoria "${CATEGORIA_A_CLASSIFICAR}" nao cadastrada. Aplique a migration 059 `
+      + '(npm run db:migrate).');
+  }
+
+  const { rows: unidades } = await cliente.query<{ id: string; codigo: string }>(
+    'SELECT id, upper(codigo) AS codigo FROM unidades');
+  const unidadePorCodigo = new Map(unidades.map((u) => [u.codigo, Number(u.id)]));
+  const unidadePadrao = unidadePorCodigo.get('UN');
+  if (unidadePadrao === undefined) throw new Error('Unidade "UN" nao cadastrada');
+
+  const codigos: string[] = [];
+  const descricoes: string[] = [];
+  const eans: Array<string | null> = [];
+  const unidadesIds: number[] = [];
+  const ativos: boolean[] = [];
+  const eansNoLote = new Set<string>();
+
+  for (const { codigo } of faltando) {
+    const e = entradas.get(codigo)!;
+    let ean = e.ean && /^[0-9]{8,14}$/.test(e.ean) ? e.ean : null;
+    if (ean && eansNoLote.has(ean)) ean = null;
+    if (ean) eansNoLote.add(ean);
+
+    codigos.push(codigo);
+    descricoes.push(e.descricao ?? `Produto ${codigo} (ERP)`);
+    eans.push(ean);
+    unidadesIds.push(unidadePorCodigo.get(e.unidade ?? '') ?? unidadePadrao);
+    ativos.push(e.ativo);
+  }
+
+  const { rowCount } = await cliente.query(`
+    INSERT INTO produtos
+      (codigo, descricao, ean, categoria_id, unidade_compra_id, unidade_estoque_id,
+       unidade_venda_id, fator_conversao, ativo)
+    SELECT n.codigo, n.descricao,
+           CASE WHEN n.ean IS NOT NULL AND NOT EXISTS (
+                  SELECT 1 FROM produtos x WHERE x.ean = n.ean AND x.deleted_at IS NULL)
+                THEN n.ean END,
+           $6, n.unidade, n.unidade, n.unidade, 1, n.ativo
+      FROM unnest($1::text[], $2::text[], $3::text[], $4::bigint[], $5::boolean[])
+           AS n(codigo, descricao, ean, unidade, ativo)
+    ON CONFLICT (upper(codigo)) WHERE deleted_at IS NULL DO NOTHING`,
+  [codigos, descricoes, eans, unidadesIds, ativos, Number(categoria[0]!.id)]);
+
+  return rowCount ?? 0;
+}
 
 // ===========================================================================
 // Registro

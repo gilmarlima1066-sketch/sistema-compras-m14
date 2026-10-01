@@ -1071,6 +1071,7 @@ export async function processarLoteClient(
   importacao_id: number;
   status?: StatusImportacao;
   total_linhas?: number;
+  motivos?: Record<string, number>;
 }> {
   const imp = await obter(importacaoId);
 
@@ -1119,6 +1120,10 @@ export async function processarLoteClient(
   let rejeitados = 0;
   const loteGravar: Array<{ linha: number; dados: Record<string, unknown> }> = [];
   const linhaBase = lote * linhas.length;
+  const motivos = new Map<string, number>(
+    Object.entries((resumo._motivos ?? {}) as Record<string, number>));
+  const contar = (motivo: string, n: number) =>
+    motivos.set(motivo, (motivos.get(motivo) ?? 0) + n);
 
   for (let i = 0; i < linhas.length; i++) {
     const resultado = mapeador.aplicarLinha(template, casamento, linhas[i]!);
@@ -1126,6 +1131,8 @@ export async function processarLoteClient(
       loteGravar.push({ linha: linhaBase + i + 2, dados: resultado.dados });
     } else {
       rejeitados += 1;
+      const primeiro = resultado.ocorrencias.find((o) => o.severidade === 'ERRO');
+      contar(primeiro ? `${primeiro.regra}: ${primeiro.campo ?? ''}` : 'linha invalida', 1);
     }
   }
 
@@ -1135,6 +1142,7 @@ export async function processarLoteClient(
     atualizados += r.atualizados;
     descartados += r.descartados;
     rejeitados += r.rejeitados;
+    for (const [motivo, n] of r.motivos) contar(motivo, n);
   }
 
   const novoCriados = Number(resumo._criados ?? 0) + criados;
@@ -1155,6 +1163,7 @@ export async function processarLoteClient(
     _descartados: novoDescartados,
     _rejeitados: novoRejeitados,
     _total: novoTotal,
+    _motivos: Object.fromEntries(motivos),
   })]);
 
   if (!isLast) {
@@ -1209,5 +1218,7 @@ export async function processarLoteClient(
     importacao_id: importacaoId,
     status: comErros ? 'CONCLUIDA_COM_ERROS' : 'CONCLUIDA',
     total_linhas: novoTotal,
+    motivos: Object.fromEntries(
+      [...motivos.entries()].sort((a, b) => b[1] - a[1]).slice(0, 20)),
   };
 }

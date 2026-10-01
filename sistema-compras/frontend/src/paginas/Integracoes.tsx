@@ -699,7 +699,8 @@ function Importar() {
             <Aviso tipo="ok">
               Saldo de estoque do ERP atualizado no local "ERP". O planejamento de
               compras ja usa o novo saldo; cada diferenca ficou registrada como
-              movimentacao de inventario.
+              movimentacao de inventario. Produtos que ainda nao existiam foram
+              cadastrados na categoria "A CLASSIFICAR (ERP)".
             </Aviso>
           )}
           <div className="grade-indicadores">
@@ -710,6 +711,20 @@ function Importar() {
             <Indicador rotulo="Rejeitados" valor={numero(resultado.rejeitados)}
               tom={resultado.rejeitados > 0 ? 'perigo' : 'neutro'} />
           </div>
+          {Object.keys(resultado.motivos ?? {}).length > 0 && (
+            <table className="tabela">
+              <thead><tr><th>Detalhe</th><th>Linhas</th></tr></thead>
+              <tbody>
+                {Object.entries(resultado.motivos as Record<string, number>)
+                  .map(([motivo, total]) => (
+                    <tr key={motivo}>
+                      <td>{motivo}</td>
+                      <td>{numero(total)}</td>
+                    </tr>
+                  ))}
+              </tbody>
+            </table>
+          )}
         </Cartao>
       )}
 
