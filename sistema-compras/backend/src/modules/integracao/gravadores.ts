@@ -514,11 +514,43 @@ interface EntradaEstoque {
   ativo: boolean;
 }
 
-/** O Rel 9054 traz "00005"; o cadastro, vindo do Rel 7104, guarda "5". */
-const normalizarCodigo = (codigo: string): string =>
-  /^\d+$/.test(codigo) ? codigo.replace(/^0+(?=\d)/, '') : codigo;
+/** Chave para casar codigo numerico com ou sem zeros a esquerda. */
+const chaveNumerica = (codigo: string): string | null =>
+  /^\d+$/.test(codigo) ? codigo.replace(/^0+(?=\d)/, '') : null;
 
 const arredondar = (n: number): number => Math.round(n * 1000) / 1000;
+
+/**
+ * Resolve codigos do ERP para produtos.
+ *
+ * O ERP exporta o codigo como texto com zeros a esquerda ("00005", "01043"),
+ * tanto no Rel 9054 quanto no Rel 7104, e e assim que o cadastro guarda. Uma
+ * planilha que passou pelo Excel pode trazer o mesmo codigo como numero ("5").
+ * O codigo exato vence; na falta dele, casa ignorando os zeros - nunca cria um
+ * segundo produto "5" ao lado do "00005".
+ */
+async function resolverProdutos(
+  cliente: PoolClient, codigos: string[],
+): Promise<Map<string, number>> {
+  const { rows } = await cliente.query<{ id: number; codigo: string }>(
+    'SELECT id, upper(codigo) AS codigo FROM produtos WHERE deleted_at IS NULL');
+
+  const exato = new Map<string, number>();
+  const numerico = new Map<string, number>();
+  for (const r of rows) {
+    exato.set(r.codigo, Number(r.id));
+    const chave = chaveNumerica(r.codigo);
+    if (chave !== null && !numerico.has(chave)) numerico.set(chave, Number(r.id));
+  }
+
+  const resolvidos = new Map<string, number>();
+  for (const codigo of codigos) {
+    const chave = chaveNumerica(codigo);
+    const id = exato.get(codigo) ?? (chave !== null ? numerico.get(chave) : undefined);
+    if (id !== undefined) resolvidos.set(codigo, id);
+  }
+  return resolvidos;
+}
 
 /**
  * O ERP e a fonte da verdade do saldo, mas a razao de estoque e somente
@@ -543,8 +575,8 @@ const gravarEstoque = async (
 
   const entradas = new Map<string, EntradaEstoque>();
   for (const { dados } of lote) {
-    const bruto = txt(dados['produto.codigo']);
-    if (!bruto) {
+    const codigo = txt(dados['produto.codigo'])?.toUpperCase();
+    if (!codigo) {
       saida.rejeitados += 1;
       conta(saida.motivos, 'linha sem codigo de produto');
       continue;
@@ -559,7 +591,7 @@ const gravarEstoque = async (
 
     // A planilha de gestao faz QTDE - |QTDEVENDIDA|: o sinal nao importa.
     const situacao = txt(dados['produto.situacao']);
-    entradas.set(normalizarCodigo(bruto.toUpperCase()), {
+    entradas.set(codigo, {
       fisico: arredondar(Math.max(fisico, 0)),
       reservado: arredondar(Math.abs(num(dados['estoque.quantidade_reservada']) ?? 0)),
       descricao: txt(dados['produto.descricao']),
@@ -588,68 +620,62 @@ const gravarEstoque = async (
     }
     const localId = Number(local[0]!.id);
 
-    const cadastrados = await cadastrarProdutosDoErp(cliente, entradas);
-    if (cadastrados > 0) {
-      conta(saida.motivos, `produto cadastrado a partir do ERP (categoria ${CATEGORIA_A_CLASSIFICAR})`,
-        cadastrados);
+    const codigos = [...entradas.keys()];
+    const produtos = await resolverProdutos(cliente, codigos);
+    const faltando = codigos.filter((c) => !produtos.has(c));
+    if (faltando.length) {
+      const novos = await cadastrarProdutosDoErp(cliente, faltando, entradas);
+      for (const [codigo, id] of novos) produtos.set(codigo, id);
+      if (novos.size) {
+        conta(saida.motivos,
+          `produto cadastrado a partir do ERP (categoria ${CATEGORIA_A_CLASSIFICAR})`, novos.size);
+      }
     }
 
-    const { rows: atuais } = await cliente.query<{
-      codigo: string; produto_id: string | null;
-      fisico: string | null; reservado: string | null;
+    const { rows: saldos } = await cliente.query<{
+      produto_id: number; fisico: number; reservado: number;
     }>(`
-      SELECT e.codigo, p.id AS produto_id,
-             s.quantidade_fisica AS fisico, s.quantidade_reservada AS reservado
-        FROM unnest($1::text[]) AS e(codigo)
-        LEFT JOIN produtos p ON upper(p.codigo) = e.codigo AND p.deleted_at IS NULL
-        LEFT JOIN estoques s ON s.produto_id = p.id AND s.local_id = $2`,
-    [[...entradas.keys()], localId]);
+      SELECT produto_id, quantidade_fisica AS fisico, quantidade_reservada AS reservado
+        FROM estoques WHERE local_id = $1 AND produto_id = ANY($2::bigint[])`,
+    [localId, [...new Set(produtos.values())]]);
+    const saldoAtual = new Map(saldos.map((s) => [Number(s.produto_id), s]));
 
     const movProdutos: number[] = [];
     const movQuantidades: number[] = [];
     const resProdutos: number[] = [];
     const resQuantidades: number[] = [];
 
-    for (const r of atuais) {
-      const e = entradas.get(r.codigo)!;
-      const semSaldo = e.fisico === 0 && e.reservado === 0;
-
-      if (!r.produto_id) {
-        // Produto zerado que nunca vendeu nao interessa ao planejamento; so
-        // e erro quando o ERP tem saldo de algo que o sistema desconhece.
-        if (semSaldo) {
-          saida.descartados += 1;
-          conta(saida.motivos, 'produto fora do cadastro e sem saldo');
-        } else {
-          saida.rejeitados += 1;
-          conta(saida.motivos, 'produto com saldo no ERP e nao cadastrado no sistema');
-        }
+    for (const [codigo, e] of entradas) {
+      const produtoId = produtos.get(codigo);
+      if (produtoId === undefined) {
+        saida.rejeitados += 1;
+        conta(saida.motivos, 'produto nao pode ser cadastrado');
         continue;
       }
 
-      const existe = r.fisico !== null;
-      const diferenca = arredondar(e.fisico - Number(r.fisico ?? 0));
-      const reservaMudou = e.reservado !== Number(r.reservado ?? 0);
+      const atual = saldoAtual.get(produtoId);
+      const semSaldo = e.fisico === 0 && e.reservado === 0;
+      const diferenca = arredondar(e.fisico - Number(atual?.fisico ?? 0));
+      const reservaMudou = e.reservado !== Number(atual?.reservado ?? 0);
 
-      if (!existe && semSaldo) {
+      if (!atual && semSaldo) {
         saida.descartados += 1;
         conta(saida.motivos, 'sem saldo no ERP');
         continue;
       }
-      if (existe && diferenca === 0 && !reservaMudou) {
+      if (atual && diferenca === 0 && !reservaMudou) {
         saida.descartados += 1;
         conta(saida.motivos, 'saldo igual ao ja registrado');
         continue;
       }
 
-      const produtoId = Number(r.produto_id);
       if (diferenca !== 0) {
         movProdutos.push(produtoId);
         movQuantidades.push(diferenca);
       }
       resProdutos.push(produtoId);
       resQuantidades.push(e.reservado);
-      if (existe) saida.atualizados += 1; else saida.criados += 1;
+      if (atual) saida.atualizados += 1; else saida.criados += 1;
     }
 
     if (movProdutos.length) {
@@ -686,24 +712,15 @@ const gravarEstoque = async (
 };
 
 /**
- * Cadastra os produtos do lote que ainda nao existem. Devolve quantos criou.
+ * Cadastra os produtos que ainda nao existem, com o codigo exatamente como o
+ * ERP exporta. Devolve codigo -> id dos criados.
  *
  * EAN e opcional: invalido, repetido no lote ou ja usado por outro produto
  * fica de fora, porque `uq_produtos_ean` derrubaria a transacao inteira.
  */
 async function cadastrarProdutosDoErp(
-  cliente: PoolClient, entradas: Map<string, EntradaEstoque>,
-): Promise<number> {
-  const { rows: faltando } = await cliente.query<{ codigo: string }>(`
-    SELECT e.codigo
-      FROM unnest($1::text[]) AS e(codigo)
-     WHERE NOT EXISTS (
-       SELECT 1 FROM produtos p
-        WHERE upper(p.codigo) = e.codigo AND p.deleted_at IS NULL)`,
-  [[...entradas.keys()]]);
-
-  if (!faltando.length) return 0;
-
+  cliente: PoolClient, faltando: string[], entradas: Map<string, EntradaEstoque>,
+): Promise<Map<string, number>> {
   const { rows: categoria } = await cliente.query<{ id: string }>(
     'SELECT id FROM categorias WHERE nome = $1', [CATEGORIA_A_CLASSIFICAR]);
   if (!categoria.length) {
@@ -725,7 +742,7 @@ async function cadastrarProdutosDoErp(
   const ativos: boolean[] = [];
   const eansNoLote = new Set<string>();
 
-  for (const { codigo } of faltando) {
+  for (const codigo of faltando) {
     const e = entradas.get(codigo)!;
     let ean = e.ean && /^[0-9]{8,14}$/.test(e.ean) ? e.ean : null;
     if (ean && eansNoLote.has(ean)) ean = null;
@@ -738,7 +755,7 @@ async function cadastrarProdutosDoErp(
     ativos.push(e.ativo);
   }
 
-  const { rowCount } = await cliente.query(`
+  const { rows } = await cliente.query<{ id: number; codigo: string }>(`
     INSERT INTO produtos
       (codigo, descricao, ean, categoria_id, unidade_compra_id, unidade_estoque_id,
        unidade_venda_id, fator_conversao, ativo)
@@ -749,10 +766,11 @@ async function cadastrarProdutosDoErp(
            $6, n.unidade, n.unidade, n.unidade, 1, n.ativo
       FROM unnest($1::text[], $2::text[], $3::text[], $4::bigint[], $5::boolean[])
            AS n(codigo, descricao, ean, unidade, ativo)
-    ON CONFLICT (upper(codigo)) WHERE deleted_at IS NULL DO NOTHING`,
+    ON CONFLICT (upper(codigo)) WHERE deleted_at IS NULL DO NOTHING
+    RETURNING id, upper(codigo) AS codigo`,
   [codigos, descricoes, eans, unidadesIds, ativos, Number(categoria[0]!.id)]);
 
-  return rowCount ?? 0;
+  return new Map(rows.map((r) => [r.codigo, Number(r.id)]));
 }
 
 // ===========================================================================

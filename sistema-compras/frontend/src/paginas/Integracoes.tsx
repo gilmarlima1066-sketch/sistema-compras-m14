@@ -309,6 +309,7 @@ function Importar() {
   const [entidade, setEntidade] = useState('');
   const [arquivoSelecionado, setArquivoSelecionado] = useState<File | null>(null);
   const [linhasParsed, setLinhasParsed] = useState<Array<Record<string, unknown>>>([]);
+  const [linhasEmBranco, setLinhasEmBranco] = useState(0);
   const [analise, setAnalise] = useState<any>(null);
   const [template, setTemplate] = useState('');
   const [validacao, setValidacao] = useState<any>(null);
@@ -367,15 +368,22 @@ function Importar() {
       const planilha = wb.Sheets[wb.SheetNames[0]!];
       if (!planilha) throw new Error('Planilha vazia ou invalida');
 
-      const linhas = XLSX.utils.sheet_to_json<Record<string, unknown>>(planilha, {
+      const todas = XLSX.utils.sheet_to_json<Record<string, unknown>>(planilha, {
         defval: '',
         raw: false,
         dateNF: 'DD/MM/YYYY',
       });
 
+      // O Excel do ERP pode trazer milhares de linhas so com a data preenchida
+      // (sobra de formatacao). Sem isto, viram "rejeitadas" e a importacao
+      // conclui com erro sem ter erro nenhum.
+      const linhas = todas.filter((l) =>
+        Object.values(l).filter((v) => String(v ?? '').trim() !== '').length > 1);
+      setLinhasEmBranco(todas.length - linhas.length);
+
       if (!linhas.length) throw new Error('Nenhuma linha encontrada no arquivo');
 
-      const colunas = Object.keys(linhas[0]!);
+      const colunas = Object.keys(todas[0]!);
       const amostra = linhas.slice(0, AMOSTRA_LINHAS);
       setLinhasParsed(linhas);
 
@@ -478,6 +486,7 @@ function Importar() {
   const resetar = () => {
     setArquivoSelecionado(null);
     setLinhasParsed([]);
+    setLinhasEmBranco(0);
     setAnalise(null);
     setValidacao(null);
     setResultado(null);
@@ -534,6 +543,7 @@ function Importar() {
               <span className="fraco" style={{ fontSize: '0.75rem' }}>
                 {nomeArquivo} ({tamanhoArquivo})
                 {linhasParsed.length > 0 && ` · ${numero(linhasParsed.length)} linhas`}
+                {linhasEmBranco > 0 && ` · ${numero(linhasEmBranco)} linhas em branco ignoradas`}
               </span>
             )}
           </div>
