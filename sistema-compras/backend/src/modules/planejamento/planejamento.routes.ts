@@ -11,6 +11,7 @@ import * as plan from './planejamento.service.js';
 import * as visoes from './visoes.service.js';
 import * as simulacao from './simulacao.service.js';
 import * as requisicao from './requisicao.service.js';
+import * as painel from './painel.service.js';
 import {
   ajustarNecessidadeSchema, alcadaSchema, calendarioComprasSchema,
   compararSimulacoesSchema, criarRequisicaoSchema, decidirNecessidadeSchema,
@@ -36,6 +37,62 @@ const contexto = (req: { usuario?: { id: number }; ip?: string }) => ({
 
 const idParam = z.object({ id: z.coerce.number().int().positive() });
 const planejamentoQuery = z.object({ planejamento_id: z.coerce.number().int().positive().optional() });
+
+// --- Painel de gestao de compras (a aba principal da planilha) ---------------
+
+const painelQuery = z.object({
+  metodo: z.enum(['PLANILHA', 'SISTEMA']).default('PLANILHA'),
+  busca: z.string().trim().max(120).optional(),
+  curva: z.enum(['A', 'B', 'C', 'SEM']).optional(),
+  status: z.string().trim().max(40).optional(),
+  situacao: z.enum(painel.SITUACOES).optional(),
+  acompanhamento: z.enum(['ATRASADO', 'COBRAR']).optional(),
+  fornecedor_id: z.coerce.number().int().positive().optional(),
+  somente_comprar: z.enum(['true', 'false']).optional().transform((v) => v === 'true'),
+  pagina: z.coerce.number().int().min(1).default(1),
+  limite: z.coerce.number().int().min(1).max(500).default(100),
+});
+
+planejamentoRouter.get('/painel', LER, rota(async (req, res) => {
+  const filtro = validar(req, 'query', painelQuery);
+  const r = await painel.painel(filtro);
+  return ok(res, { linhas: r.linhas, resumo: r.resumo }, 'Painel de gestao de compras', {
+    total: r.total, pagina: filtro.pagina, limite: filtro.limite,
+    paginas: Math.max(1, Math.ceil(r.total / filtro.limite)),
+  });
+}));
+
+planejamentoRouter.patch('/painel/produtos/:id/situacao', PLANEJAR, rota(async (req, res) => {
+  const { id } = validar(req, 'params', idParam);
+  const { situacao } = validar(req, 'body', z.object({ situacao: z.enum(painel.SITUACOES) }));
+  return ok(res, await painel.definirSituacao(id, situacao), 'Situacao de compra atualizada');
+}));
+
+const dias = z.coerce.number().int().min(0).max(365).nullable().optional();
+const politicaSchema = z.object({
+  escopo: z.enum(['GLOBAL', 'CURVA', 'FORNECEDOR', 'PRODUTO']),
+  curva: z.enum(['A', 'B', 'C']).nullable().optional(),
+  fornecedor_id: z.coerce.number().int().positive().nullable().optional(),
+  produto_codigo: z.string().trim().max(60).nullable().optional(),
+  horizonte_dias: z.coerce.number().int().min(1).max(365).nullable().optional(),
+  estoque_minimo_dias: dias,
+  lead_time_dias: dias,
+  observacao: z.string().trim().max(500).nullable().optional(),
+});
+
+planejamentoRouter.get('/politicas', LER, rota(async (_req, res) =>
+  ok(res, await painel.listarPoliticas(), 'Politicas de compra')));
+
+planejamentoRouter.put('/politicas', PARAMETRIZAR, rota(async (req, res) => {
+  const dados = validar(req, 'body', politicaSchema);
+  return ok(res, await painel.salvarPolitica(dados, contexto(req)), 'Politica de compra salva');
+}));
+
+planejamentoRouter.delete('/politicas/:id', PARAMETRIZAR, rota(async (req, res) => {
+  const { id } = validar(req, 'params', idParam);
+  await painel.removerPolitica(id);
+  return ok(res, { id }, 'Politica de compra removida');
+}));
 
 // --- Dashboard e visoes -----------------------------------------------------
 

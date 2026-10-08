@@ -21,6 +21,7 @@ const MENU: Array<{ grupo: string; itens: Item[] }> = [
     itens: [
       { rotulo: 'Estoque', icone: '▦', caminho: '/estoque' },
       { rotulo: 'Demanda', icone: '◷', caminho: '/demanda' },
+      { rotulo: 'Gestao de compras', icone: '◫', caminho: '/gestao-compras' },
       { rotulo: 'Compras', icone: '⇄', caminho: '/compras' },
       { rotulo: 'Cotacoes', icone: '≡', caminho: '/cotacoes' },
       { rotulo: 'Negociacao e Pedidos', icone: '⌸', caminho: '/ordens-compra' },

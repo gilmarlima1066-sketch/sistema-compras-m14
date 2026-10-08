@@ -11,6 +11,7 @@ import { Usuarios } from './paginas/Usuarios';
 import { EmBreve } from './paginas/EmBreve';
 import { Demanda } from './paginas/Demanda';
 import { Compras } from './paginas/Compras';
+import { GestaoCompras } from './paginas/GestaoCompras';
 import { Cotacoes } from './paginas/Cotacoes';
 import { Negociacoes } from './paginas/Negociacoes';
 import { Entregas } from './paginas/Entregas';
@@ -56,6 +57,7 @@ export function App() {
             <Route path="produtos" element={<Produtos />} />
             <Route path="fornecedores" element={<Fornecedores />} />
             <Route path="demanda" element={<Demanda />} />
+            <Route path="gestao-compras" element={<GestaoCompras />} />
             <Route path="compras" element={<Compras />} />
             <Route path="cotacoes" element={<Cotacoes />} />
             <Route path="ordens-compra" element={<Negociacoes />} />
