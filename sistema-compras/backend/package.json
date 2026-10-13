@@ -12,6 +12,7 @@
     "db:migrate": "tsx src/scripts/migrate.ts",
     "db:seed": "tsx src/scripts/seed.ts",
     "db:reset": "tsx src/scripts/reset.ts",
+    "db:limpar-teste": "tsx src/scripts/limpar-dados-teste.ts",
     "db:transferir": "tsx src/scripts/transferir-dados.ts",
     "test:smoke": "tsx src/scripts/smoke-test.ts",
     "test:m04": "tsx src/scripts/testes/m04-demanda.ts",
