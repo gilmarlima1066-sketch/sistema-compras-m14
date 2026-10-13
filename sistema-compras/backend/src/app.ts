@@ -17,6 +17,10 @@ export function criarApp() {
   // existe - depois, `req.body` e um objeto, e reserializar produz outra string
   // (ordem de chaves, espacos), o que quebraria a assinatura HMAC dos webhooks
   // do modulo 13. Guardar aqui nao muda nada para as demais rotas.
+  // Lotes de importacao chegam com ate ~3 MB (o navegador mira 3 MB; a Vercel
+  // recusa acima de 4,5 MB). Vem antes do parser geral, que para nas demais
+  // rotas continua em 1 MB, e nao guarda o corpo cru: so os webhooks precisam.
+  app.use('/api/integracoes/importacoes', express.json({ limit: '4mb' }));
   app.use(express.json({
     limit: '1mb',
     verify: (req, _res, buf) => {

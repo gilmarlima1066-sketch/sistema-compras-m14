@@ -35,8 +35,13 @@ function traduzirErroBanco(erro: ErroPostgres): ErroApp | null {
 }
 
 export const errorHandler: ErrorRequestHandler = (erro, _req, res, _next) => {
-  const appErro =
-    erro instanceof ErroApp ? erro : traduzirErroBanco(erro as ErroPostgres);
+  // Corpo acima do limite do express.json: e erro de quem envia, nao do servidor.
+  const corpoGrande = (erro as { type?: string }).type === 'entity.too.large'
+    ? new ErroApp('VALIDATION_ERROR',
+      'Requisicao grande demais. Envie os dados em lotes menores.', 413)
+    : null;
+  const appErro = corpoGrande
+    ?? (erro instanceof ErroApp ? erro : traduzirErroBanco(erro as ErroPostgres));
 
   if (appErro) {
     return res.status(appErro.status).json({
