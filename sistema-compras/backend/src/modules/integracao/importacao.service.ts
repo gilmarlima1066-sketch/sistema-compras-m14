@@ -520,7 +520,7 @@ export async function processar(
 
   // Vive por toda a execucao e atravessa os lotes. Ver o comentario do tipo
   // Gravador: e o que impede um lote de desfazer o trabalho do anterior.
-  const estado: EstadoImportacao = new Map();
+  const estado: EstadoImportacao = new Map([['importacao_id', importacaoId]]);
 
   const descarregar = async () => {
     if (!lote.length) return;
@@ -1049,18 +1049,22 @@ async function validarAmostra(
 /**
  * Processa um lote de linhas ja parseadas pelo navegador.
  *
- * O navegador envia os dados em lotes de ate 8 mil linhas (ca. 3 MB JSON).
- * Cada lote e validado e gravado imediatamente; o estado entre lotes (quais
- * documentos ja tiveram os itens limpos, o id da execucao) vive em
- * `importacoes.resumo` enquanto o processamento esta em andamento.
+ * O navegador envia os dados em lotes (ate 25 mil linhas, so as colunas
+ * mapeadas, em matriz). Cada lote e validado e gravado imediatamente; o que
+ * precisa atravessar os lotes (id da execucao, contadores, lotes ja gravados)
+ * vive em `importacoes.resumo` enquanto o processamento esta em andamento.
+ *
+ * Reenviar um lote ja gravado (resposta perdida na rede) devolve o resultado
+ * sem gravar de novo - sem isso os itens da nota seriam duplicados.
  */
 export async function processarLoteClient(
   importacaoId: number,
   lote: number,
   totalLotes: number,
-  linhas: Array<Record<string, unknown>>,
+  linhasBrutas: Array<Record<string, unknown> | unknown[]>,
   isLast: boolean,
   contexto: ContextoSessao,
+  opcoes: { colunas?: string[] | undefined; linhaInicial?: number | undefined } = {},
 ): Promise<{
   lote: number;
   criados: number;
@@ -1072,6 +1076,8 @@ export async function processarLoteClient(
   status?: StatusImportacao;
   total_linhas?: number;
   motivos?: Record<string, number>;
+  ja_gravado?: boolean;
+  pos_processar?: boolean;
 }> {
   const imp = await obter(importacaoId);
 
@@ -1094,6 +1100,26 @@ export async function processarLoteClient(
   const casamento = mapeador.casarColunas(template, colunas);
   const resumo = (imp.resumo as Record<string, unknown>) ?? {};
 
+  const lotesGravados = new Set((resumo._lotes as number[] | undefined) ?? []);
+  if (lotesGravados.has(lote)) {
+    return {
+      lote, criados: 0, atualizados: 0, descartados: 0, rejeitados: 0,
+      concluida: imp.status === 'CONCLUIDA' || imp.status === 'CONCLUIDA_COM_ERROS',
+      importacao_id: importacaoId, ja_gravado: true,
+    };
+  }
+
+  // Formato compacto: cabecalho uma vez e cada linha como lista de valores.
+  // Corta o JSON pela metade e deixa o lote maior caber no limite da Vercel.
+  const nomes = opcoes.colunas;
+  const linhas: Array<Record<string, unknown>> = linhasBrutas.map((l) => {
+    if (!Array.isArray(l)) return l;
+    if (!nomes) throw regraNegocio('Lote em formato de matriz precisa das colunas');
+    const obj: Record<string, unknown> = {};
+    for (let c = 0; c < nomes.length; c++) obj[nomes[c]!] = l[c];
+    return obj;
+  });
+
   let execucaoId: number;
   if (lote === 0) {
     await query("UPDATE importacoes SET status = 'PROCESSANDO' WHERE id = $1", [importacaoId]);
@@ -1113,13 +1139,14 @@ export async function processarLoteClient(
 
   const estadoRaw = (resumo._estado ?? {}) as Record<string, unknown>;
   const estado: EstadoImportacao = new Map(Object.entries(estadoRaw));
+  estado.set('importacao_id', importacaoId);
 
   let criados = 0;
   let atualizados = 0;
   let descartados = 0;
   let rejeitados = 0;
   const loteGravar: Array<{ linha: number; dados: Record<string, unknown> }> = [];
-  const linhaBase = lote * linhas.length;
+  const linhaBase = opcoes.linhaInicial ?? lote * linhas.length;
   const motivos = new Map<string, number>(
     Object.entries((resumo._motivos ?? {}) as Record<string, number>));
   const contar = (motivo: string, n: number) =>
@@ -1164,6 +1191,7 @@ export async function processarLoteClient(
     _rejeitados: novoRejeitados,
     _total: novoTotal,
     _motivos: Object.fromEntries(motivos),
+    _lotes: [...lotesGravados, lote],
   })]);
 
   if (!isLast) {
@@ -1195,14 +1223,6 @@ export async function processarLoteClient(
     comErros ? 'CONCLUIDA_COM_ERROS' : 'CONCLUIDA',
     novoTotal, novoCriados, novoAtualizados, novoDescartados, novoRejeitados]);
 
-  // Importacao de vendas precisa atualizar as views materializadas de demanda
-  // para que o modulo de Demanda (historico, dashboard, previsao) enxergue os
-  // novos registros imediatamente. CONCURRENTLY nao bloqueia leituras.
-  if (String(imp.entidade) === 'vendas') {
-    await query('REFRESH MATERIALIZED VIEW CONCURRENTLY mv_demanda_diaria');
-    await query('REFRESH MATERIALIZED VIEW CONCURRENTLY mv_demanda_mensal');
-  }
-
   if (comErros) {
     await avisarErros(
       importacaoId, String(imp.nome_arquivo), novoRejeitados, novoTotal, contexto);
@@ -1218,7 +1238,41 @@ export async function processarLoteClient(
     importacao_id: importacaoId,
     status: comErros ? 'CONCLUIDA_COM_ERROS' : 'CONCLUIDA',
     total_linhas: novoTotal,
+    pos_processar: ENTIDADES_COM_POS_PROCESSAMENTO.has(String(imp.entidade)),
     motivos: Object.fromEntries(
       [...motivos.entries()].sort((a, b) => b[1] - a[1]).slice(0, 20)),
   };
+}
+
+// ---------------------------------------------------------------------------
+// Pos-processamento (requisicao propria, depois do ultimo lote)
+// ---------------------------------------------------------------------------
+
+const ENTIDADES_COM_POS_PROCESSAMENTO = new Set(['vendas']);
+
+/**
+ * Atualiza o que depende do que foi importado.
+ *
+ * Para vendas: as views materializadas de demanda, que alimentam dashboard,
+ * historico, analise, previsao e o painel de compras. Fica fora do ultimo
+ * lote de proposito: com a base grande o REFRESH leva segundos, e somado ao
+ * lote poderia estourar o limite de 60 s da Vercel - perdendo a resposta de
+ * um lote que ja foi gravado. CONCURRENTLY nao bloqueia leituras.
+ */
+export async function posProcessar(importacaoId: number): Promise<{
+  importacao_id: number; atualizado: string[]; duracao_ms: number;
+}> {
+  const imp = await obter(importacaoId);
+  if (imp.status !== 'CONCLUIDA' && imp.status !== 'CONCLUIDA_COM_ERROS') {
+    throw regraNegocio('A importacao ainda nao terminou de gravar');
+  }
+
+  const inicio = Date.now();
+  const atualizado: string[] = [];
+  if (String(imp.entidade) === 'vendas') {
+    await query('REFRESH MATERIALIZED VIEW CONCURRENTLY mv_demanda_diaria');
+    await query('REFRESH MATERIALIZED VIEW CONCURRENTLY mv_demanda_mensal');
+    atualizado.push('mv_demanda_diaria', 'mv_demanda_mensal');
+  }
+  return { importacao_id: importacaoId, atualizado, duracao_ms: Date.now() - inicio };
 }

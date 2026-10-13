@@ -59,45 +59,46 @@ const num = (v: unknown): number | null => {
  * vendas ja no banco foram gravadas, e manter a mesma chave e o que faz
  * reimportar o arquivo reconhecer o que ja entrou em vez de duplicar.
  *
- * DEVOLUCOES SAO DESCARTADAS, por decisao do usuario (28/09/2026).
+ * DEVOLUCOES SAO DESCARTADAS, por decisao do usuario (28/09/2026). A base tem
+ * 1.985 devolucoes importadas antes dessa decisao, e `mv_demanda_diaria`
+ * subtrai a quantidade delas: a demanda fica liquida de devolucao no periodo
+ * antigo e bruta no novo. O descarte e contado, nunca silencioso.
  *
- * Vale registrar a consequencia junto da regra, porque quem ler este codigo
- * daqui a um ano precisa saber: a base tem 1.985 devolucoes importadas ANTES
- * dessa decisao, e `mv_demanda_diaria` subtrai a quantidade delas. Com o
- * descarte, a demanda fica liquida de devolucao no periodo antigo e bruta no
- * novo. O descarte e contado e aparece no relatorio de importacao, nunca em
- * silencio.
+ * DESEMPENHO: um lote de 20 mil linhas e gravado com um numero FIXO de
+ * consultas (unnest), nao com cinco por item. A versao linha a linha levava
+ * minutos por lote e estourava o limite de 60 s da funcao da Vercel.
+ *
+ * ITENS DE NOTA JA EXISTENTE sao regravados inteiros (o relatorio nao tem
+ * numero de item para casar um a um). A limpeza acontece UMA vez por nota por
+ * importacao: a venda guarda `ultima_importacao_id`, e uma nota dividida entre
+ * dois lotes so e limpa no primeiro. Antes isso dependia de um Set em memoria
+ * que nao sobrevivia entre as requisicoes do navegador.
+ *
+ * Produto que nao existe e cadastrado (categoria = SUBGRUPO), como fazia o ETL
+ * que montou a base: perder a venda por falta de cadastro e pior do que ter o
+ * produto para classificar depois.
  */
+interface ItemVenda {
+  produto: string; descricao: string | null; subgrupo: string | null;
+  quantidade: number; valor: number; preco: number;
+}
+
+interface DocumentoVenda {
+  chave: string; data: string; cliente: string | null; clienteNome: string | null;
+  cidade: string | null; estado: string | null; canal: string | null;
+  itens: ItemVenda[];
+}
+
 const gravarVendas = async (
   lote: Linha[], contexto: ContextoSessao, estado: EstadoImportacao,
 ): Promise<Saida> => {
-  /*
-   * Documentos cujos itens ja foram limpos NESTA execucao.
-   *
-   * Sem este conjunto, um documento dividido entre dois lotes perde itens: o
-   * segundo lote apaga o que o primeiro inseriu. Aconteceu de verdade na
-   * primeira importacao do arquivo do ERP - 688 documentos, 9.866 itens. A
-   * limpeza agora acontece UMA vez por documento por execucao; os lotes
-   * seguintes apenas acrescentam.
-   */
-  let limpos = estado.get('vendas_limpas') as Set<number> | undefined;
-  if (!limpos) { limpos = new Set<number>(); estado.set('vendas_limpas', limpos); }
-
+  const importacaoId = Number(estado.get('importacao_id')) || null;
   const saida: Saida = {
     criados: 0, atualizados: 0, descartados: 0, rejeitados: 0, motivos: new Map(),
   };
 
-  // Agrupa o lote por documento antes de tocar no banco: uma nota com doze
-  // itens vira uma venda e doze itens, nao doze vendas.
-  const documentos = new Map<string, {
-    cabecalho: Record<string, unknown>;
-    itens: Array<{ linha: number; dados: Record<string, unknown> }>;
-  }>();
-
-  for (const registro of lote) {
-    const d = registro.dados;
-
-    // Decisao do usuario: devolucao nao entra.
+  const documentos = new Map<string, DocumentoVenda>();
+  for (const { dados: d } of lote) {
     if (String(d['venda.tipo_documento'] ?? '').trim().toUpperCase() === 'DEVOLUCAO') {
       saida.descartados += 1;
       conta(saida.motivos, 'devolucao descartada por configuracao');
@@ -107,20 +108,43 @@ const gravarVendas = async (
     const numero = txt(d['venda.numero_documento']);
     const cliente = txt(d['cliente.codigo_externo']);
     const data = txt(d['venda.data_venda']);
-
     if (!numero || !data) {
       saida.rejeitados += 1;
       conta(saida.motivos, 'documento sem numero ou sem data');
       continue;
     }
 
-    const chave = `${numero}/${cliente ?? '0'}/${data.replace(/-/g, '')}`;
-    const grupo = documentos.get(chave);
-    if (grupo) {
-      grupo.itens.push(registro);
-    } else {
-      documentos.set(chave, { cabecalho: d, itens: [registro] });
+    const produto = txt(d['produto.codigo'])?.toUpperCase();
+    if (!produto) {
+      saida.rejeitados += 1;
+      conta(saida.motivos, 'item sem codigo de produto');
+      continue;
     }
+
+    const quantidade = num(d['item.quantidade']) ?? 0;
+    if (quantidade <= 0) {
+      saida.rejeitados += 1;
+      conta(saida.motivos, 'quantidade zero ou negativa');
+      continue;
+    }
+    const valor = num(d['item.valor_total']) ?? 0;
+
+    const chave = `${numero}/${cliente ?? '0'}/${data.replace(/-/g, '')}`;
+    let doc = documentos.get(chave);
+    if (!doc) {
+      doc = {
+        chave, data, cliente,
+        clienteNome: txt(d['cliente.nome']), cidade: txt(d['cliente.cidade']),
+        estado: txt(d['cliente.estado']), canal: txt(d['venda.canal']), itens: [],
+      };
+      documentos.set(chave, doc);
+    }
+    doc.itens.push({
+      produto, quantidade, valor,
+      preco: num(d['item.preco_unitario']) ?? valor / quantidade,
+      descricao: txt(d['produto.descricao']),
+      subgrupo: txt(d['produto.subcategoria']),
+    });
   }
 
   if (!documentos.size) return saida;
@@ -133,88 +157,118 @@ const gravarVendas = async (
         ['app.usuario_id', String(contexto.usuarioId)]);
     }
 
-    for (const [chave, grupo] of documentos) {
-      const c = grupo.cabecalho;
-
-      const clienteId = await resolverCliente(cliente, c);
-
-      // A venda e inserida com ON CONFLICT sobre `uq_vendas_numero`: se a nota
-      // ja existe, nao duplica. `xmax = 0` distingue insercao de conflito sem
-      // uma segunda consulta.
-      const { rows: vendaRows } = await cliente.query<{ id: string; inserido: boolean }>(`
-        INSERT INTO vendas
-          (numero_documento, data_venda, cliente_id, canal, valor_total, status,
-           tipo_documento, origem_integracao)
-        VALUES ($1, $2::date, $3, $4, 0, 'FATURADA',
-                'VENDA'::tipo_documento_venda_enum, $5)
-        ON CONFLICT (numero_documento) DO UPDATE
-          SET data_venda = EXCLUDED.data_venda
-        RETURNING id, (xmax = 0) AS inserido`,
-      [chave, txt(c['venda.data_venda']), clienteId,
-        txt(c['venda.canal']), 'ERP:REL7104']);
-
-      const vendaId = Number(vendaRows[0]!.id);
-      const vendaNova = vendaRows[0]!.inserido;
-
-      if (vendaNova) saida.criados += 1; else saida.atualizados += 1;
-
-      // Os itens sao regravados inteiros quando a nota ja existia: evita o
-      // estado meio-velho-meio-novo de tentar casar item a item sem uma chave
-      // natural de item (o relatorio nao tem numero de item).
-      //
-      // A limpeza acontece UMA vez por documento por execucao. Um documento que
-      // aparece em dois lotes e limpo no primeiro e so recebe acrescimo no
-      // segundo - foi o que faltava e custou 9.866 itens na primeira execucao.
-      if (!vendaNova && !limpos.has(vendaId)) {
-        await cliente.query('DELETE FROM itens_venda WHERE venda_id = $1', [vendaId]);
-      }
-      limpos.add(vendaId);
-
-      let totalVenda = 0;
-      for (const item of grupo.itens) {
-        const d = item.dados;
-        const codigo = txt(d['produto.codigo']);
-        if (!codigo) {
-          saida.rejeitados += 1;
-          conta(saida.motivos, 'item sem codigo de produto');
-          continue;
-        }
-
-        const { rows: prod } = await cliente.query<{ id: string }>(
-          'SELECT id FROM produtos WHERE codigo = $1 AND deleted_at IS NULL', [codigo]);
-
-        if (!prod.length) {
-          // Produto inexistente NAO e cadastrado aqui. A venda fica gravada sem
-          // este item, e o motivo aparece no relatorio — cadastrar produto a
-          // partir de venda encheria o cadastro de codigo digitado torto.
-          saida.rejeitados += 1;
-          conta(saida.motivos, `produto nao cadastrado (ex.: ${codigo})`);
-          continue;
-        }
-
-        const quantidade = num(d['item.quantidade']) ?? 0;
-        const valorTotal = num(d['item.valor_total']) ?? 0;
-        const precoUnitario = num(d['item.preco_unitario'])
-          ?? (quantidade > 0 ? valorTotal / quantidade : 0);
-
-        if (quantidade <= 0) {
-          saida.rejeitados += 1;
-          conta(saida.motivos, 'quantidade zero ou negativa');
-          continue;
-        }
-
-        await cliente.query(`
-          INSERT INTO itens_venda
-            (venda_id, produto_id, quantidade, preco_unitario, desconto, valor_total)
-          VALUES ($1, $2, $3, $4, 0, $5)`,
-        [vendaId, Number(prod[0]!.id), quantidade, precoUnitario, valorTotal]);
-
-        totalVenda += valorTotal;
-      }
-
-      await cliente.query('UPDATE vendas SET valor_total = $2 WHERE id = $1',
-        [vendaId, totalVenda]);
+    // --- Produtos: resolve todos de uma vez; cadastra os que faltam -------
+    const primeiroItem = new Map<string, ItemVenda>();
+    for (const doc of documentos.values()) {
+      for (const item of doc.itens) if (!primeiroItem.has(item.produto)) primeiroItem.set(item.produto, item);
     }
+    const codigos = [...primeiroItem.keys()];
+    const produtos = await resolverProdutos(cliente, codigos);
+    const faltando = codigos.filter((c) => !produtos.has(c));
+    if (faltando.length) {
+      const novos = await cadastrarProdutos(cliente, faltando.map((c) => {
+        const item = primeiroItem.get(c)!;
+        return {
+          codigo: c, descricao: item.descricao, ean: null, unidade: null,
+          ativo: true, categoria: item.subgrupo,
+        };
+      }));
+      for (const [codigo, id] of novos) produtos.set(codigo, id);
+      if (novos.size) conta(saida.motivos, 'produto cadastrado a partir da venda', novos.size);
+    }
+
+    // --- Clientes: um upsert para o lote todo ----------------------------
+    const clientes = await gravarClientes(cliente, documentos);
+
+    // --- Notas que ja existiam e ainda nao foram limpas nesta importacao --
+    const chaves = [...documentos.keys()];
+    const { rows: existentes } = await cliente.query<{
+      id: number; numero_documento: string; ultima_importacao_id: number | null;
+    }>(`
+      SELECT id, numero_documento, ultima_importacao_id
+        FROM vendas WHERE numero_documento = ANY($1::text[])`, [chaves]);
+    const jaTocadas = new Set<string>();
+    const limpar: number[] = [];
+    for (const e of existentes) {
+      if (importacaoId !== null && Number(e.ultima_importacao_id) === importacaoId) {
+        jaTocadas.add(e.numero_documento);
+      } else {
+        limpar.push(Number(e.id));
+      }
+    }
+    if (limpar.length) {
+      await cliente.query('DELETE FROM itens_venda WHERE venda_id = ANY($1::bigint[])', [limpar]);
+    }
+
+    // --- Vendas: um upsert para o lote todo ------------------------------
+    const docs = [...documentos.values()];
+    const { rows: vendas } = await cliente.query<{
+      id: number; numero_documento: string; inserido: boolean;
+    }>(`
+      INSERT INTO vendas
+        (numero_documento, data_venda, cliente_id, canal, valor_total, status,
+         tipo_documento, origem_integracao, ultima_importacao_id)
+      SELECT v.chave, v.data::date, v.cliente_id, v.canal, 0, 'FATURADA',
+             'VENDA'::tipo_documento_venda_enum, 'ERP:REL7104', $5
+        FROM unnest($1::text[], $2::text[], $3::bigint[], $4::text[])
+             AS v(chave, data, cliente_id, canal)
+      ON CONFLICT (numero_documento) DO UPDATE
+        SET data_venda = EXCLUDED.data_venda,
+            cliente_id = coalesce(EXCLUDED.cliente_id, vendas.cliente_id),
+            ultima_importacao_id = EXCLUDED.ultima_importacao_id,
+            updated_at = now()
+      RETURNING id, numero_documento, (xmax = 0) AS inserido`,
+    [docs.map((d) => d.chave), docs.map((d) => d.data),
+      docs.map((d) => (d.cliente ? clientes.get(d.cliente) ?? null : null)),
+      docs.map((d) => d.canal), importacaoId]);
+
+    const vendaPorChave = new Map<string, number>();
+    for (const v of vendas) {
+      vendaPorChave.set(v.numero_documento, Number(v.id));
+      if (v.inserido) saida.criados += 1;
+      else if (!jaTocadas.has(v.numero_documento)) saida.atualizados += 1;
+    }
+
+    // --- Itens: um insert para o lote todo -------------------------------
+    const itVenda: number[] = [];
+    const itProduto: number[] = [];
+    const itQtd: number[] = [];
+    const itPreco: number[] = [];
+    const itValor: number[] = [];
+    for (const doc of docs) {
+      const vendaId = vendaPorChave.get(doc.chave)!;
+      for (const item of doc.itens) {
+        const produtoId = produtos.get(item.produto);
+        if (produtoId === undefined) {
+          saida.rejeitados += 1;
+          conta(saida.motivos, 'produto nao pode ser cadastrado');
+          continue;
+        }
+        itVenda.push(vendaId);
+        itProduto.push(produtoId);
+        itQtd.push(item.quantidade);
+        itPreco.push(item.preco);
+        itValor.push(item.valor);
+      }
+    }
+
+    if (itVenda.length) {
+      await cliente.query(`
+        INSERT INTO itens_venda
+          (venda_id, produto_id, quantidade, preco_unitario, desconto, valor_total)
+        SELECT i.venda_id, i.produto_id, i.quantidade, i.preco, 0, i.valor
+          FROM unnest($1::bigint[], $2::bigint[], $3::numeric[], $4::numeric[], $5::numeric[])
+               AS i(venda_id, produto_id, quantidade, preco, valor)`,
+      [itVenda, itProduto, itQtd, itPreco, itValor]);
+    }
+
+    // O total sai dos itens gravados, inclusive os de lotes anteriores.
+    await cliente.query(`
+      UPDATE vendas v SET valor_total = s.total
+        FROM (SELECT venda_id, sum(valor_total) AS total
+                FROM itens_venda WHERE venda_id = ANY($1::bigint[])
+               GROUP BY venda_id) s
+       WHERE v.id = s.venda_id`, [[...vendaPorChave.values()]]);
 
     await cliente.query('COMMIT');
   } catch (erro) {
@@ -228,31 +282,33 @@ const gravarVendas = async (
 };
 
 /**
- * Cliente: cadastrado sob demanda, ao contrario de produto.
- *
- * A diferenca e deliberada. Produto errado estraga estoque, demanda e compra —
- * o cadastro tem de ser deliberado. Cliente so serve para analisar de onde vem
- * a venda; nao ter o cliente faria perder a venda inteira, o que e pior.
+ * Cliente: cadastrado sob demanda. So serve para analisar de onde vem a venda;
+ * nao ter o cliente faria perder a venda inteira, o que e pior.
  */
-async function resolverCliente(
-  cliente: PoolClient, dados: Record<string, unknown>,
-): Promise<number | null> {
-  const codigo = txt(dados['cliente.codigo_externo']);
-  if (!codigo) return null;
+async function gravarClientes(
+  cliente: PoolClient, documentos: Map<string, DocumentoVenda>,
+): Promise<Map<string, number>> {
+  const porCodigo = new Map<string, DocumentoVenda>();
+  for (const doc of documentos.values()) {
+    if (doc.cliente && !porCodigo.has(doc.cliente)) porCodigo.set(doc.cliente, doc);
+  }
+  if (!porCodigo.size) return new Map();
 
-  const { rows } = await cliente.query<{ id: string }>(`
+  const lista = [...porCodigo.values()];
+  const { rows } = await cliente.query<{ id: number; codigo_externo: string }>(`
     INSERT INTO clientes (codigo_externo, nome, cidade, estado, canal, ativo)
-    VALUES ($1, $2, $3, $4, $5, true)
+    SELECT c.codigo, coalesce(c.nome, 'Cliente ' || c.codigo), c.cidade, c.estado, c.canal, true
+      FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[])
+           AS c(codigo, nome, cidade, estado, canal)
     ON CONFLICT (codigo_externo) DO UPDATE
       SET nome = coalesce(EXCLUDED.nome, clientes.nome),
           cidade = coalesce(EXCLUDED.cidade, clientes.cidade),
           estado = coalesce(EXCLUDED.estado, clientes.estado)
-    RETURNING id`,
-  [codigo, txt(dados['cliente.nome']) ?? `Cliente ${codigo}`,
-    txt(dados['cliente.cidade']), txt(dados['cliente.estado']),
-    txt(dados['venda.canal'])]);
+    RETURNING id, codigo_externo`,
+  [lista.map((d) => d.cliente), lista.map((d) => d.clienteNome), lista.map((d) => d.cidade),
+    lista.map((d) => d.estado), lista.map((d) => d.canal)]);
 
-  return Number(rows[0]!.id);
+  return new Map(rows.map((r) => [r.codigo_externo, Number(r.id)]));
 }
 
 // ===========================================================================
@@ -624,7 +680,13 @@ const gravarEstoque = async (
     const produtos = await resolverProdutos(cliente, codigos);
     const faltando = codigos.filter((c) => !produtos.has(c));
     if (faltando.length) {
-      const novos = await cadastrarProdutosDoErp(cliente, faltando, entradas);
+      const novos = await cadastrarProdutos(cliente, faltando.map((c) => {
+        const e = entradas.get(c)!;
+        return {
+          codigo: c, descricao: e.descricao, ean: e.ean, unidade: e.unidade,
+          ativo: e.ativo, categoria: null,
+        };
+      }));
       for (const [codigo, id] of novos) produtos.set(codigo, id);
       if (novos.size) {
         conta(saida.motivos,
@@ -711,23 +773,33 @@ const gravarEstoque = async (
   return saida;
 };
 
+interface NovoProduto {
+  codigo: string; descricao: string | null; ean: string | null;
+  unidade: string | null; ativo: boolean;
+  /** Nome da categoria (SUBGRUPO do ERP); sem ela, "A CLASSIFICAR (ERP)". */
+  categoria: string | null;
+}
+
 /**
- * Cadastra os produtos que ainda nao existem, com o codigo exatamente como o
- * ERP exporta. Devolve codigo -> id dos criados.
+ * Cadastra produtos com o codigo exatamente como o ERP exporta. Devolve
+ * codigo -> id dos criados.
  *
- * EAN e opcional: invalido, repetido no lote ou ja usado por outro produto
- * fica de fora, porque `uq_produtos_ean` derrubaria a transacao inteira.
+ * A categoria e o SUBGRUPO do ERP, criada se ainda nao existe - a mesma
+ * convencao do ETL que montou a base. EAN invalido, repetido no lote ou ja
+ * usado por outro produto fica de fora, porque `uq_produtos_ean` derrubaria a
+ * transacao inteira.
  */
-async function cadastrarProdutosDoErp(
-  cliente: PoolClient, faltando: string[], entradas: Map<string, EntradaEstoque>,
+async function cadastrarProdutos(
+  cliente: PoolClient, novos: NovoProduto[],
 ): Promise<Map<string, number>> {
-  const { rows: categoria } = await cliente.query<{ id: string }>(
-    'SELECT id FROM categorias WHERE nome = $1', [CATEGORIA_A_CLASSIFICAR]);
-  if (!categoria.length) {
-    throw new Error(
-      `Categoria "${CATEGORIA_A_CLASSIFICAR}" nao cadastrada. Aplique a migration 059 `
-      + '(npm run db:migrate).');
-  }
+  const nomesCategoria = [...new Set(novos.map((n) => n.categoria ?? CATEGORIA_A_CLASSIFICAR))];
+  await cliente.query(`
+    INSERT INTO categorias (nome, descricao, ativo)
+    SELECT n, 'Importado do ERP (SUBGRUPO)', true FROM unnest($1::text[]) AS n
+    ON CONFLICT (nome) DO NOTHING`, [nomesCategoria]);
+  const { rows: categorias } = await cliente.query<{ id: number; nome: string }>(
+    'SELECT id, nome FROM categorias WHERE nome = ANY($1::text[])', [nomesCategoria]);
+  const categoriaPorNome = new Map(categorias.map((c) => [c.nome, Number(c.id)]));
 
   const { rows: unidades } = await cliente.query<{ id: string; codigo: string }>(
     'SELECT id, upper(codigo) AS codigo FROM unidades');
@@ -740,19 +812,20 @@ async function cadastrarProdutosDoErp(
   const eans: Array<string | null> = [];
   const unidadesIds: number[] = [];
   const ativos: boolean[] = [];
+  const categoriasIds: number[] = [];
   const eansNoLote = new Set<string>();
 
-  for (const codigo of faltando) {
-    const e = entradas.get(codigo)!;
-    let ean = e.ean && /^[0-9]{8,14}$/.test(e.ean) ? e.ean : null;
+  for (const n of novos) {
+    let ean = n.ean && /^[0-9]{8,14}$/.test(n.ean) ? n.ean : null;
     if (ean && eansNoLote.has(ean)) ean = null;
     if (ean) eansNoLote.add(ean);
 
-    codigos.push(codigo);
-    descricoes.push(e.descricao ?? `Produto ${codigo} (ERP)`);
+    codigos.push(n.codigo);
+    descricoes.push(n.descricao ?? `Produto ${n.codigo} (ERP)`);
     eans.push(ean);
-    unidadesIds.push(unidadePorCodigo.get(e.unidade ?? '') ?? unidadePadrao);
-    ativos.push(e.ativo);
+    unidadesIds.push(unidadePorCodigo.get(n.unidade ?? '') ?? unidadePadrao);
+    ativos.push(n.ativo);
+    categoriasIds.push(categoriaPorNome.get(n.categoria ?? CATEGORIA_A_CLASSIFICAR)!);
   }
 
   const { rows } = await cliente.query<{ id: number; codigo: string }>(`
@@ -763,12 +836,12 @@ async function cadastrarProdutosDoErp(
            CASE WHEN n.ean IS NOT NULL AND NOT EXISTS (
                   SELECT 1 FROM produtos x WHERE x.ean = n.ean AND x.deleted_at IS NULL)
                 THEN n.ean END,
-           $6, n.unidade, n.unidade, n.unidade, 1, n.ativo
-      FROM unnest($1::text[], $2::text[], $3::text[], $4::bigint[], $5::boolean[])
-           AS n(codigo, descricao, ean, unidade, ativo)
+           n.categoria, n.unidade, n.unidade, n.unidade, 1, n.ativo
+      FROM unnest($1::text[], $2::text[], $3::text[], $4::bigint[], $5::boolean[], $6::bigint[])
+           AS n(codigo, descricao, ean, unidade, ativo, categoria)
     ON CONFLICT (upper(codigo)) WHERE deleted_at IS NULL DO NOTHING
     RETURNING id, upper(codigo) AS codigo`,
-  [codigos, descricoes, eans, unidadesIds, ativos, Number(categoria[0]!.id)]);
+  [codigos, descricoes, eans, unidadesIds, ativos, categoriasIds]);
 
   return new Map(rows.map((r) => [r.codigo, Number(r.id)]));
 }

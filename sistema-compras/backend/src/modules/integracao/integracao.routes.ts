@@ -16,7 +16,7 @@
  * convencoes ja existentes", e duas linguas no mesmo servico e uma armadilha
  * para quem for manter.
  */
-import { Router } from 'express';
+import { Router, type Request } from 'express';
 import { mkdirSync } from 'node:fs';
 import { extname } from 'node:path';
 import multer from 'multer';
@@ -59,6 +59,20 @@ const CONFIGURAR = exigirPermissao('integracao.configurar');
 const CREDENCIAL = exigirPermissao('integracao.credencial');
 const SINCRONIZAR = exigirPermissao('integracao.sincronizar');
 const IMPORTAR = exigirPermissao('integracao.importar');
+// O botao "Importar vendas" da tela de Demanda usa estas mesmas rotas.
+const IMPORTAR_VENDAS = exigirPermissao('integracao.importar', 'demanda.importar');
+
+/** Quem so tem `demanda.importar` importa vendas, e nenhuma outra entidade. */
+async function exigirEscopo(
+  req: Request, alvo: { entidade: string } | { importacaoId: number },
+): Promise<void> {
+  const permissoes = req.usuario?.permissoes ?? [];
+  if (permissoes.includes('*') || permissoes.includes('integracao.importar')) return;
+  const entidade = 'entidade' in alvo
+    ? alvo.entidade
+    : String((await importacao.obter(alvo.importacaoId)).entidade);
+  if (entidade !== 'vendas') throw semPermissao('Permissao necessaria: integracao.importar');
+}
 const EXPORTAR = exigirPermissao('integracao.exportar');
 const REPROCESSAR = exigirPermissao('integracao.reprocessar');
 const CONCILIAR = exigirPermissao('integracao.conciliar');
@@ -474,8 +488,9 @@ integracaoRouter.post(
  * As linhas chegam depois via /processar-lote, em pedacos de ate 8 mil linhas.
  * Isso contorna o limite de 4.5 MB que a Vercel aplica a funcoes serverless.
  */
-integracaoRouter.post('/importacoes/iniciar-client', IMPORTAR, rota(async (req, res) => {
+integracaoRouter.post('/importacoes/iniciar-client', IMPORTAR_VENDAS, rota(async (req, res) => {
   const e = validarEntrada(req, 'body', iniciarClientSchema);
+  await exigirEscopo(req, { entidade: e.entidade });
   criado(res, await importacao.iniciarImportacaoClient({
     nome_arquivo: e.nome_arquivo,
     entidade: e.entidade,
@@ -529,13 +544,15 @@ integracaoRouter.post('/importacoes/:id/mapear', IMPORTAR, rota(async (req, res)
   ok(res, await importacao.definirMapeamento(id, template));
 }));
 
-integracaoRouter.post('/importacoes/:id/validar', IMPORTAR, rota(async (req, res) => {
+integracaoRouter.post('/importacoes/:id/validar', IMPORTAR_VENDAS, rota(async (req, res) => {
   const { id } = validarEntrada(req, 'params', idParam);
+  await exigirEscopo(req, { importacaoId: id });
   ok(res, await importacao.validar(id));
 }));
 
-integracaoRouter.post('/importacoes/:id/confirmar', IMPORTAR, rota(async (req, res) => {
+integracaoRouter.post('/importacoes/:id/confirmar', IMPORTAR_VENDAS, rota(async (req, res) => {
   const { id } = validarEntrada(req, 'params', idParam);
+  await exigirEscopo(req, { importacaoId: id });
   ok(res, await importacao.confirmar(id, usuarioId(req)),
     'Importacao confirmada. Use /processar para gravar os registros.');
 }));
@@ -555,22 +572,30 @@ integracaoRouter.post('/importacoes/:id/cancelar', IMPORTAR, rota(async (req, re
 /**
  * Processa um lote de linhas enviado pelo navegador.
  *
- * Cada lote chega com ate 8 mil linhas (ca. 3 MB JSON), ja parseadas pelo
- * SheetJS no browser. O backend valida e grava imediatamente via o gravador
- * registrado para a entidade. O estado entre lotes (documentos limpos, id da
- * execucao, contadores) fica em `importacoes.resumo` durante o processamento.
+ * Cada lote chega com ate 25 mil linhas, ja lidas pelo SheetJS no browser e
+ * so com as colunas mapeadas, em matriz. O backend valida e grava
+ * imediatamente via o gravador registrado para a entidade.
  */
-integracaoRouter.post('/importacoes/:id/processar-lote', IMPORTAR, rota(async (req, res) => {
+integracaoRouter.post('/importacoes/:id/processar-lote', IMPORTAR_VENDAS, rota(async (req, res) => {
   const { id } = validarEntrada(req, 'params', idParam);
+  await exigirEscopo(req, { importacaoId: id });
   const e = validarEntrada(req, 'body', processarLoteSchema);
   ok(res, await importacao.processarLoteClient(
     id,
     e.lote,
     e.total_lotes,
-    e.linhas as Array<Record<string, unknown>>,
+    e.linhas as Array<Record<string, unknown> | unknown[]>,
     e.is_last,
     contexto(req),
+    { colunas: e.colunas, linhaInicial: e.linha_inicial },
   ));
+}));
+
+/** Depois do ultimo lote: para vendas, atualiza as analises de demanda. */
+integracaoRouter.post('/importacoes/:id/pos-processar', IMPORTAR_VENDAS, rota(async (req, res) => {
+  const { id } = validarEntrada(req, 'params', idParam);
+  await exigirEscopo(req, { importacaoId: id });
+  ok(res, await importacao.posProcessar(id), 'Analises atualizadas');
 }));
 
 // ===========================================================================

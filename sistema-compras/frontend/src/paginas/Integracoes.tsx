@@ -18,8 +18,10 @@
  * importador economize.
  */
 import { useCallback, useEffect, useState } from 'react';
-import * as XLSX from 'xlsx';
 import { api, ErroApi } from '../api/client';
+import {
+  gravarEmLotes, lerPlanilha, linhaParaObjeto, posProcessar, type PlanilhaLida,
+} from '../importacao/importador';
 import { useAuth } from '../auth/AuthContext';
 import { CabecalhoPagina } from '../componentes/Cabecalho';
 import { GraficoLinha } from '../componentes/graficos';
@@ -279,28 +281,7 @@ function Central() {
 
 // ---------------------------------------------------------------------------
 
-const TAMANHO_LOTE = 8000;
 const AMOSTRA_LINHAS = 100;
-
-/**
- * XLSX (zip) e XLS binario (OLE) sao lidos como bytes. O resto e texto: CSV e
- * o ".xls" do ERP, que na verdade e uma tabela HTML em Windows-1252. Texto e
- * lido com raw para preservar zeros a esquerda e codigos de barras longos.
- */
-function lerPastaDeTrabalho(bytes: Uint8Array): XLSX.WorkBook {
-  const zip = bytes[0] === 0x50 && bytes[1] === 0x4b;
-  const ole = bytes[0] === 0xd0 && bytes[1] === 0xcf;
-  if (zip || ole) {
-    return XLSX.read(bytes, { type: 'array', raw: false, dateNF: 'DD/MM/YYYY' });
-  }
-  let texto: string;
-  try {
-    texto = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
-  } catch {
-    texto = new TextDecoder('windows-1252').decode(bytes);
-  }
-  return XLSX.read(texto, { type: 'string', raw: true });
-}
 
 function Importar() {
   const [entidades, setEntidades] = useState<string[]>([]);
@@ -308,7 +289,7 @@ function Importar() {
   const [importacoes, setImportacoes] = useState<any[]>([]);
   const [entidade, setEntidade] = useState('');
   const [arquivoSelecionado, setArquivoSelecionado] = useState<File | null>(null);
-  const [linhasParsed, setLinhasParsed] = useState<Array<Record<string, unknown>>>([]);
+  const [planilhaLida, setPlanilhaLida] = useState<PlanilhaLida | null>(null);
   const [linhasEmBranco, setLinhasEmBranco] = useState(0);
   const [analise, setAnalise] = useState<any>(null);
   const [template, setTemplate] = useState('');
@@ -351,9 +332,9 @@ function Importar() {
   };
 
   /**
-   * Le o arquivo no browser com SheetJS, envia apenas cabecalho + amostra ao
-   * backend e guarda todas as linhas em estado para o processamento em lotes.
-   * Contorna o limite de 4.5 MB da Vercel: o arquivo nunca sobe por inteiro.
+   * Le o arquivo no navegador (Web Worker, sem travar a tela), envia apenas
+   * cabecalho + amostra ao backend e guarda as linhas para a gravacao em
+   * lotes. O arquivo nunca sobe inteiro: contorna o limite de 4,5 MB da Vercel.
    */
   const analisar = async () => {
     if (!arquivoSelecionado || !entidade) return;
@@ -362,30 +343,10 @@ function Importar() {
     setProgresso('Lendo arquivo...');
 
     try {
-      const wb = lerPastaDeTrabalho(new Uint8Array(await arquivoSelecionado.arrayBuffer()));
-
-      if (!wb.SheetNames.length) throw new Error('O arquivo nao contem planilhas validas');
-      const planilha = wb.Sheets[wb.SheetNames[0]!];
-      if (!planilha) throw new Error('Planilha vazia ou invalida');
-
-      const todas = XLSX.utils.sheet_to_json<Record<string, unknown>>(planilha, {
-        defval: '',
-        raw: false,
-        dateNF: 'DD/MM/YYYY',
-      });
-
-      // O Excel do ERP pode trazer milhares de linhas so com a data preenchida
-      // (sobra de formatacao). Sem isto, viram "rejeitadas" e a importacao
-      // conclui com erro sem ter erro nenhum.
-      const linhas = todas.filter((l) =>
-        Object.values(l).filter((v) => String(v ?? '').trim() !== '').length > 1);
-      setLinhasEmBranco(todas.length - linhas.length);
-
-      if (!linhas.length) throw new Error('Nenhuma linha encontrada no arquivo');
-
-      const colunas = Object.keys(todas[0]!);
-      const amostra = linhas.slice(0, AMOSTRA_LINHAS);
-      setLinhasParsed(linhas);
+      const lida = await lerPlanilha(arquivoSelecionado, setProgresso);
+      setLinhasEmBranco(lida.emBranco);
+      if (!lida.linhas.length) throw new Error('Nenhuma linha encontrada no arquivo');
+      setPlanilhaLida(lida);
 
       setProgresso('Analisando estrutura...');
       // Passa o template automaticamente quando existe um para a entidade
@@ -396,9 +357,9 @@ function Importar() {
         corpo: {
           nome_arquivo: arquivoSelecionado.name,
           entidade,
-          colunas,
-          amostra,
-          total_linhas: linhas.length,
+          colunas: lida.colunas,
+          amostra: lida.linhas.slice(0, AMOSTRA_LINHAS).map((l) => linhaParaObjeto(lida.colunas, l)),
+          total_linhas: lida.linhas.length,
           template: sugerido?.codigo ?? null,
         },
       });
@@ -425,55 +386,30 @@ function Importar() {
   };
 
   /**
-   * Confirma e processa em lotes: cada lote tem ate TAMANHO_LOTE linhas
-   * (ca. 3 MB JSON), garantindo que cada requisicao fique abaixo do limite
-   * da Vercel. O backend grava cada lote imediatamente via o gravador da
-   * entidade; o progresso e exibido linha a linha.
+   * Confirma e grava em lotes (tamanho calculado para ~3 MB por requisicao).
+   * Depois, o pos-processamento da entidade - para vendas, as analises de
+   * demanda.
    */
   const gravar = async () => {
+    if (!planilhaLida) return;
     const c = await passo<any>(`/integracoes/importacoes/${analise.importacao_id}/confirmar`);
     if (!c) return;
 
-    const totalLotes = Math.ceil(linhasParsed.length / TAMANHO_LOTE);
     setOcupado(true);
     setErro(null);
-
     try {
-      const jwt = localStorage.getItem('compras.token') ?? '';
-      let ultimoResultado: any = null;
-
-      for (let lote = 0; lote < totalLotes; lote++) {
-        const inicio = lote * TAMANHO_LOTE;
-        const fim = Math.min(inicio + TAMANHO_LOTE, linhasParsed.length);
-        const linhsLote = linhasParsed.slice(inicio, fim);
-        const isLast = lote === totalLotes - 1;
-
-        setProgresso(
-          `Gravando lote ${lote + 1} de ${totalLotes} `
-          + `(${numero(fim)} de ${numero(linhasParsed.length)} linhas)...`
-        );
-
-        const resp = await fetch(
-          `/api/integracoes/importacoes/${analise.importacao_id}/processar-lote`,
-          {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              Authorization: `Bearer ${jwt}`,
-            },
-            body: JSON.stringify({ lote, total_lotes: totalLotes, linhas: linhsLote, is_last: isLast }),
-          },
-        );
-
-        const json = await resp.json().catch(() => null);
-        if (!resp.ok) {
-          throw new Error(json?.error?.message ?? `Falha no lote ${lote + 1}: ${resp.status}`);
-        }
-
-        if (isLast) ultimoResultado = json?.data ?? null;
+      const r = await gravarEmLotes({
+        importacaoId: analise.importacao_id,
+        planilha: planilhaLida,
+        aoProgredir: (p) => setProgresso(
+          `Gravando lote ${p.lote} de ${p.totalLotes} `
+          + `(${numero(p.linhasEnviadas)} de ${numero(p.totalLinhas)} linhas)...`),
+      });
+      if (r.pos_processar) {
+        setProgresso('Atualizando as analises...');
+        await posProcessar(analise.importacao_id);
       }
-
-      setResultado(ultimoResultado);
+      setResultado(r);
       await carregar();
     } catch (e) {
       setErro(e instanceof Error ? e.message : 'Falha ao processar os lotes');
@@ -485,7 +421,7 @@ function Importar() {
 
   const resetar = () => {
     setArquivoSelecionado(null);
-    setLinhasParsed([]);
+    setPlanilhaLida(null);
     setLinhasEmBranco(0);
     setAnalise(null);
     setValidacao(null);
@@ -494,6 +430,7 @@ function Importar() {
     setTemplate('');
   };
 
+  const totalLinhas = planilhaLida?.linhas.length ?? 0;
   const nomeArquivo = arquivoSelecionado?.name;
   const tamanhoArquivo = arquivoSelecionado
     ? arquivoSelecionado.size < 1024 * 1024
@@ -530,7 +467,7 @@ function Importar() {
                 onChange={(e) => {
                   const f = e.target.files?.[0] ?? null;
                   setArquivoSelecionado(f);
-                  setLinhasParsed([]);
+                  setPlanilhaLida(null);
                   setAnalise(null);
                   setValidacao(null);
                   setResultado(null);
@@ -542,7 +479,7 @@ function Importar() {
             {nomeArquivo && (
               <span className="fraco" style={{ fontSize: '0.75rem' }}>
                 {nomeArquivo} ({tamanhoArquivo})
-                {linhasParsed.length > 0 && ` · ${numero(linhasParsed.length)} linhas`}
+                {totalLinhas > 0 && ` · ${numero(totalLinhas)} linhas`}
                 {linhasEmBranco > 0 && ` · ${numero(linhasEmBranco)} linhas em branco ignoradas`}
               </span>
             )}
@@ -573,7 +510,7 @@ function Importar() {
       </Cartao>
 
       {analise && (
-        <Cartao titulo={`Importacao ${analise.importacao_id} — ${numero(analise.total_estimado ?? linhasParsed.length)} linhas`}>
+        <Cartao titulo={`Importacao ${analise.importacao_id} — ${numero(analise.total_estimado ?? totalLinhas)} linhas`}>
           {analise.ja_importado && (
             <Aviso>
               Este arquivo ja foi importado em {dataHora(analise.ja_importado.em)}
@@ -686,8 +623,8 @@ function Importar() {
           )}
 
           <p className="fraco">
-            Confirmar inicia o processamento de {numero(linhasParsed.length)} linhas
-            em {Math.ceil(linhasParsed.length / TAMANHO_LOTE)} lotes.
+            Confirmar inicia o processamento de {numero(totalLinhas)} linhas,
+            enviadas em lotes.
             Registros existentes sao atualizados, nunca duplicados.
           </p>
           <button type="button" className="botao botao--primario"

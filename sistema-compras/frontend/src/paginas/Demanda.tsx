@@ -3,6 +3,7 @@ import { api, ErroApi } from '../api/client';
 import { useAuth } from '../auth/AuthContext';
 import { useLista } from '../hooks/useLista';
 import { CabecalhoPagina } from '../componentes/Cabecalho';
+import { ImportarVendas } from '../componentes/ImportarVendas';
 import {
   Aviso, Cartao, Entrada, Etiqueta, Indicador, Modal, Paginacao, Selecao, Vazio,
   data as fmtData, dataHora, moeda, numero,
@@ -52,12 +53,16 @@ export function Demanda() {
   const { pode } = useAuth();
   const [aba, setAba] = useState<Aba>('dashboard');
   const [dias, setDias] = useState('90');
+  // Trocar a chave remonta a aba aberta: depois de importar, tudo recarrega.
+  const [versao, setVersao] = useState(0);
+  const podeImportar = pode('demanda.importar') || pode('integracao.importar');
 
   return (
     <>
       <CabecalhoPagina
         titulo="Demanda"
         descricao="Historico de vendas, demanda, sazonalidade e previsao. Alimenta o planejamento de compras."
+        acoes={podeImportar ? <ImportarVendas aoConcluir={() => setVersao((v) => v + 1)} /> : undefined}
       />
 
       <nav className="abas">
@@ -73,14 +78,16 @@ export function Demanda() {
         ))}
       </nav>
 
-      {aba === 'dashboard' && <PainelDashboard dias={dias} setDias={setDias} />}
-      {aba === 'vendas' && <PainelVendas />}
-      {aba === 'analise' && <PainelAnalise dias={dias} setDias={setDias} />}
-      {aba === 'previsao' && <PainelPrevisao podeCalcular={pode('demanda.prever')} />}
-      {aba === 'sazonalidade' && <PainelSazonalidade podeCalcular={pode('demanda.prever')} />}
-      {aba === 'abc' && <PainelAbcXyz podeCalcular={pode('demanda.prever')} />}
-      {aba === 'ruptura' && <PainelRuptura podeCalcular={pode('demanda.prever')} />}
-      {aba === 'parametros' && <PainelParametros podeEditar={pode('demanda.ajustar')} />}
+      <div key={versao}>
+        {aba === 'dashboard' && <PainelDashboard dias={dias} setDias={setDias} />}
+        {aba === 'vendas' && <PainelVendas />}
+        {aba === 'analise' && <PainelAnalise dias={dias} setDias={setDias} />}
+        {aba === 'previsao' && <PainelPrevisao podeCalcular={pode('demanda.prever')} />}
+        {aba === 'sazonalidade' && <PainelSazonalidade podeCalcular={pode('demanda.prever')} />}
+        {aba === 'abc' && <PainelAbcXyz podeCalcular={pode('demanda.prever')} />}
+        {aba === 'ruptura' && <PainelRuptura podeCalcular={pode('demanda.prever')} />}
+        {aba === 'parametros' && <PainelParametros podeEditar={pode('demanda.ajustar')} />}
+      </div>
     </>
   );
 }

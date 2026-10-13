@@ -301,7 +301,10 @@ export const iniciarClientSchema = z.object({
 export const processarLoteSchema = z.object({
   lote: z.coerce.number().int().min(0),
   total_lotes: z.coerce.number().int().min(1),
-  linhas: z.array(z.record(z.unknown())).min(1).max(10000),
+  // Objeto por linha (formato antigo) ou matriz com `colunas` (compacto).
+  linhas: z.array(z.union([z.record(z.unknown()), z.array(z.unknown())])).min(1).max(25000),
+  colunas: z.array(z.string().max(120)).max(500).optional(),
+  linha_inicial: z.coerce.number().int().min(0).optional(),
   is_last: z.coerce.boolean(),
 });
 
