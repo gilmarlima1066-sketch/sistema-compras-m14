@@ -509,6 +509,7 @@ interface FornecedorErp {
   telefone: string | null; email: string | null; endereco: string | null; numero: string | null;
   bairro: string | null; cidade: string | null; estado: string | null; cep: string | null;
   data_ultimo_pedido: string | null; valor_ultimo_pedido: number | null;
+  origem_fornecedor: 'NACIONAL' | 'INTERNACIONAL'; pais: string;
 }
 
 /**
@@ -541,13 +542,16 @@ async function gravarFornecedoresErp(
       conta(saida.motivos, 'fornecedor sem NOME nem FANTASIA');
       continue;
     }
+    // O ERP marca fornecedor do exterior com UF "EX" e CNPJ zerado.
+    const uf = txt(dados['fornecedor.estado'])?.toUpperCase() ?? null;
+    const exterior = uf === 'EX';
     const docBruto = txt(dados['fornecedor.documento']);
-    const documento = documentoFornecedor(docBruto);
-    if (docBruto && !documento) conta(saida.motivos, 'CNPJ/CPF invalido: importado sem documento');
+    const documento = exterior ? null : documentoFornecedor(docBruto);
+    if (exterior) conta(saida.motivos, 'fornecedor do exterior (UF EX): cadastrado como internacional');
+    else if (docBruto && !documento) conta(saida.motivos, 'CNPJ/CPF invalido: importado sem documento');
     const emailBruto = txt(dados['fornecedor.email']);
     const email = primeiroEmail(emailBruto);
     if (emailBruto && !email) conta(saida.motivos, 'e-mail invalido: importado sem e-mail');
-    const uf = txt(dados['fornecedor.estado'])?.toUpperCase() ?? null;
     const valor = dados['fornecedor.valor_ultimo_pedido'];
     const ativo = dados['fornecedor.ativo'];
 
@@ -566,8 +570,10 @@ async function gravarFornecedoresErp(
       numero: txt(dados['fornecedor.numero'])?.replace(/\.0+$/, '') ?? null,
       bairro: txt(dados['fornecedor.bairro']),
       cidade: txt(dados['fornecedor.cidade']),
-      estado: uf && uf.length >= 2 && uf.length <= 40 ? uf : null,
-      cep: cepDe(dados['fornecedor.cep']),
+      estado: !exterior && uf && uf.length >= 2 && uf.length <= 40 ? uf : null,
+      cep: exterior ? null : cepDe(dados['fornecedor.cep']),
+      origem_fornecedor: exterior ? 'INTERNACIONAL' : 'NACIONAL',
+      pais: exterior ? 'Exterior' : 'Brasil',
       data_ultimo_pedido: txt(dados['fornecedor.data_ultimo_pedido']),
       valor_ultimo_pedido: typeof valor === 'number' && valor > 0 ? valor : null,
     });
@@ -624,16 +630,16 @@ async function gravarFornecedoresErp(
       INSERT INTO fornecedores
         (codigo_erp, razao_social, nome_fantasia, ativo, cnpj, inscricao_estadual, contato,
          telefone, email, endereco, numero, bairro, cidade, estado, cep,
-         data_ultimo_pedido, valor_ultimo_pedido, origem_fornecedor, created_by, updated_by)
+         data_ultimo_pedido, valor_ultimo_pedido, origem_fornecedor, pais, created_by, updated_by)
       SELECT x.codigo_erp, x.razao_social, coalesce(x.nome_fantasia, x.razao_social), x.ativo,
              x.cnpj, x.inscricao_estadual, x.contato, x.telefone, x.email, x.endereco, x.numero,
              x.bairro, x.cidade, x.estado, x.cep, x.data_ultimo_pedido, x.valor_ultimo_pedido,
-             'NACIONAL', $2, $2
+             x.origem_fornecedor::origem_fornecedor_enum, x.pais, $2, $2
         FROM jsonb_to_recordset($1::jsonb) AS x(
           codigo_erp text, razao_social text, nome_fantasia text, ativo boolean, cnpj text,
           inscricao_estadual text, contato text, telefone text, email text, endereco text,
           numero text, bairro text, cidade text, estado text, cep text,
-          data_ultimo_pedido date, valor_ultimo_pedido numeric)
+          data_ultimo_pedido date, valor_ultimo_pedido numeric, origem_fornecedor text, pais text)
       ON CONFLICT (codigo_erp) WHERE codigo_erp IS NOT NULL AND deleted_at IS NULL DO UPDATE
         SET razao_social = EXCLUDED.razao_social,
             nome_fantasia = EXCLUDED.nome_fantasia,
@@ -651,6 +657,8 @@ async function gravarFornecedoresErp(
             cep = coalesce(EXCLUDED.cep, fornecedores.cep),
             data_ultimo_pedido = coalesce(EXCLUDED.data_ultimo_pedido, fornecedores.data_ultimo_pedido),
             valor_ultimo_pedido = coalesce(EXCLUDED.valor_ultimo_pedido, fornecedores.valor_ultimo_pedido),
+            origem_fornecedor = EXCLUDED.origem_fornecedor,
+            pais = EXCLUDED.pais,
             updated_by = EXCLUDED.updated_by,
             updated_at = now()
       RETURNING (xmax = 0) AS inserido`,
