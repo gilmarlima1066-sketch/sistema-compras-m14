@@ -570,6 +570,17 @@ interface EntradaEstoque {
   ativo: boolean;
 }
 
+/** Soma os saldos; descricao e cadastro ficam com a linha ativa (ou a de mais saldo). */
+function mesclarEntradas(a: EntradaEstoque, b: EntradaEstoque): EntradaEstoque {
+  const principal = (b.ativo && !a.ativo) || (b.ativo === a.ativo && b.fisico > a.fisico) ? b : a;
+  return {
+    ...principal,
+    fisico: arredondar(a.fisico + b.fisico),
+    reservado: arredondar(a.reservado + b.reservado),
+    ativo: a.ativo || b.ativo,
+  };
+}
+
 /** Chave para casar codigo numerico com ou sem zeros a esquerda. */
 const chaveNumerica = (codigo: string): string | null =>
   /^\d+$/.test(codigo) ? codigo.replace(/^0+(?=\d)/, '') : null;
@@ -647,14 +658,24 @@ const gravarEstoque = async (
 
     // A planilha de gestao faz QTDE - |QTDEVENDIDA|: o sinal nao importa.
     const situacao = txt(dados['produto.situacao']);
-    entradas.set(codigo, {
+    const nova: EntradaEstoque = {
       fisico: arredondar(Math.max(fisico, 0)),
       reservado: arredondar(Math.abs(num(dados['estoque.quantidade_reservada']) ?? 0)),
       descricao: txt(dados['produto.descricao']),
       ean: txt(dados['produto.ean']),
       unidade: txt(dados['produto.unidade'])?.toUpperCase() ?? null,
       ativo: situacao === null || situacao.toUpperCase() === 'ATIVO',
-    });
+    };
+    // O ERP reaproveita codigo: o 84 e o produto ativo com saldo e tambem uma
+    // embalagem inativa e zerada. Sobrescrever pela ultima linha zerava o
+    // saldo real; o saldo do codigo e a soma, e o cadastro vem da linha ativa.
+    const anterior = entradas.get(codigo);
+    if (anterior) {
+      conta(saida.motivos, 'codigo repetido no ERP: saldos somados');
+      entradas.set(codigo, mesclarEntradas(anterior, nova));
+    } else {
+      entradas.set(codigo, nova);
+    }
   }
 
   if (!entradas.size) return saida;
@@ -662,6 +683,10 @@ const gravarEstoque = async (
   const cliente = await pool.connect();
   try {
     await cliente.query('BEGIN');
+    // A diferenca e calculada sobre o saldo lido aqui. Duas cargas ao mesmo
+    // tempo (nova tentativa do navegador, duas abas) aplicariam o mesmo ajuste
+    // duas vezes e o saldo ficaria negativo: uma carga espera a outra.
+    await cliente.query("SELECT pg_advisory_xact_lock(hashtext('importacao:estoque'))");
     if (contexto.usuarioId) {
       await cliente.query('SELECT set_config($1, $2, true)',
         ['app.usuario_id', String(contexto.usuarioId)]);
@@ -707,6 +732,9 @@ const gravarEstoque = async (
     const resProdutos: number[] = [];
     const resQuantidades: number[] = [];
 
+    // Codigos diferentes podem cair no mesmo produto ("84" e "00084"): um
+    // ajuste por produto, senao cada um descontaria o mesmo saldo atual.
+    const porProduto = new Map<number, EntradaEstoque>();
     for (const [codigo, e] of entradas) {
       const produtoId = produtos.get(codigo);
       if (produtoId === undefined) {
@@ -714,7 +742,11 @@ const gravarEstoque = async (
         conta(saida.motivos, 'produto nao pode ser cadastrado');
         continue;
       }
+      const anterior = porProduto.get(produtoId);
+      porProduto.set(produtoId, anterior ? mesclarEntradas(anterior, e) : e);
+    }
 
+    for (const [produtoId, e] of porProduto) {
       const atual = saldoAtual.get(produtoId);
       const semSaldo = e.fisico === 0 && e.reservado === 0;
       const diferenca = arredondar(e.fisico - Number(atual?.fisico ?? 0));
