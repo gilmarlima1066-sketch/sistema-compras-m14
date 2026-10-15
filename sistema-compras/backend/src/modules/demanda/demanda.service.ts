@@ -63,15 +63,31 @@ function condicoesProduto(filtro: FiltroPeriodo, valores: unknown[]): string[] {
 // Dashboard
 // ---------------------------------------------------------------------------
 
+function periodoComparacao(periodo: Periodo, comparar: FiltroPeriodo['comparar']) {
+  const inicio = new Date(`${periodo.inicio}T00:00:00Z`);
+  if (comparar === 'ano_anterior') {
+    const umAnoAntes = (d: string) => {
+      const x = new Date(`${d}T00:00:00Z`);
+      x.setUTCFullYear(x.getUTCFullYear() - 1);
+      return iso(x);
+    };
+    return { anteriorInicio: umAnoAntes(periodo.inicio), anteriorFim: umAnoAntes(periodo.fim) };
+  }
+  return {
+    anteriorInicio: iso(new Date(inicio.getTime() - periodo.dias * 86400000)),
+    anteriorFim: iso(new Date(inicio.getTime() - 86400000)),
+  };
+}
+
 export async function dashboard(filtro: FiltroPeriodo) {
   const periodo = await resolverPeriodo(filtro);
   const valores: unknown[] = [periodo.inicio, periodo.fim];
   const cond = condicoesProduto(filtro, valores);
   const onde = cond.length ? `AND ${cond.join(' AND ')}` : '';
 
-  // Periodo imediatamente anterior, de mesmo tamanho, para a variacao.
-  const anteriorFim = iso(new Date(new Date(`${periodo.inicio}T00:00:00Z`).getTime() - 86400000));
-  const anteriorInicio = iso(new Date(new Date(`${periodo.inicio}T00:00:00Z`).getTime() - periodo.dias * 86400000));
+  // Base da variacao: os `dias` imediatamente antes do inicio (7 dias de
+  // 09/10 a 15/10 comparam com 02/10 a 08/10) ou as mesmas datas do ano anterior.
+  const { anteriorInicio, anteriorFim } = periodoComparacao(periodo, filtro.comparar);
 
   const { rows } = await query(`
     WITH base AS (
@@ -99,6 +115,7 @@ export async function dashboard(filtro: FiltroPeriodo) {
         FROM atual a LEFT JOIN anterior ant ON ant.produto_id = a.produto_id
     )
     SELECT
+      (SELECT max(data_venda)::text FROM mv_demanda_diaria)                            AS ultima_venda,
       (SELECT coalesce(sum(quantidade), 0) FROM base)                                  AS quantidade_vendida,
       (SELECT coalesce(sum(valor), 0) FROM base)                                       AS faturamento,
       (SELECT coalesce(sum(documentos), 0) FROM base)                                  AS documentos,
@@ -128,6 +145,8 @@ export async function dashboard(filtro: FiltroPeriodo) {
     ...detalhe,
     periodo,
     periodo_anterior: { inicio: anteriorInicio, fim: anteriorFim },
+    comparar: filtro.comparar,
+    ultima_venda: (r.ultima_venda as unknown as string | null) ?? null,
     quantidade_vendida: quantidade,
     faturamento: Number(r.faturamento ?? 0),
     documentos: Number(r.documentos ?? 0),
@@ -159,44 +178,47 @@ interface LinhaProdutoDash {
 async function detalheDashboard(
   filtro: FiltroPeriodo, periodo: Periodo, anteriorInicio: string, anteriorFim: string,
 ) {
-  const valores: unknown[] = [anteriorInicio, periodo.fim];
+  // $1..$2 e o periodo atual, $3..$4 a base de comparacao (contigua ou um ano antes).
+  const valores: unknown[] = [periodo.inicio, periodo.fim, anteriorInicio, anteriorFim];
   const cond = condicoesProduto(filtro, valores);
   const onde = cond.length ? `AND ${cond.join(' AND ')}` : '';
   const base = `
     SELECT d.produto_id, d.data_venda, d.quantidade, d.valor
       FROM mv_demanda_diaria d
       JOIN produtos p ON p.id = d.produto_id AND p.deleted_at IS NULL
-     WHERE d.data_venda BETWEEN $1 AND $2 ${onde}`;
-  const corte = valores.length + 1;
+     WHERE (d.data_venda BETWEEN $1 AND $2 OR d.data_venda BETWEEN $3 AND $4) ${onde}`;
 
   const [serie, produtos] = await Promise.all([
-    query<{ dia: string; quantidade: number; valor: number }>(`
-      WITH base AS (${base})
-      SELECT g.dia::date::text AS dia,
+    query<{ dia: string; quantidade: number; valor: number; atual: boolean }>(`
+      WITH base AS (${base}),
+      dias AS (
+        SELECT g.dia::date AS dia, true AS atual FROM generate_series($1::date, $2::date, interval '1 day') g(dia)
+        UNION ALL
+        SELECT g.dia::date, false FROM generate_series($3::date, $4::date, interval '1 day') g(dia)
+      )
+      SELECT d.dia::text AS dia, d.atual,
              coalesce(sum(b.quantidade), 0)::float8 AS quantidade,
              coalesce(sum(b.valor), 0)::float8 AS valor
-        FROM generate_series($1::date, $2::date, interval '1 day') AS g(dia)
-        LEFT JOIN base b ON b.data_venda = g.dia::date
-       GROUP BY g.dia ORDER BY g.dia`, valores),
+        FROM dias d
+        LEFT JOIN base b ON b.data_venda = d.dia
+       GROUP BY d.dia, d.atual ORDER BY d.atual, d.dia`, valores),
     query<LinhaProdutoDash>(`
       WITH base AS (${base})
       SELECT b.produto_id, p.codigo, p.descricao, p.classificacao_abc::text AS curva,
-             coalesce(sum(b.quantidade) FILTER (WHERE b.data_venda >= $${corte}), 0)::float8 AS quantidade,
-             coalesce(sum(b.valor)      FILTER (WHERE b.data_venda >= $${corte}), 0)::float8 AS valor,
-             coalesce(sum(b.quantidade) FILTER (WHERE b.data_venda <  $${corte}), 0)::float8 AS quantidade_anterior,
-             coalesce(sum(b.valor)      FILTER (WHERE b.data_venda <  $${corte}), 0)::float8 AS valor_anterior
+             coalesce(sum(b.quantidade) FILTER (WHERE b.data_venda >= $1::date), 0)::float8 AS quantidade,
+             coalesce(sum(b.valor)      FILTER (WHERE b.data_venda >= $1::date), 0)::float8 AS valor,
+             coalesce(sum(b.quantidade) FILTER (WHERE b.data_venda <  $1::date), 0)::float8 AS quantidade_anterior,
+             coalesce(sum(b.valor)      FILTER (WHERE b.data_venda <  $1::date), 0)::float8 AS valor_anterior
         FROM base b JOIN produtos p ON p.id = b.produto_id
-       GROUP BY b.produto_id, p.codigo, p.descricao, p.classificacao_abc`,
-    [...valores, periodo.inicio]),
+       GROUP BY b.produto_id, p.codigo, p.descricao, p.classificacao_abc`, valores),
   ]);
 
-  // A serie vem do inicio do periodo anterior ao fim do atual: os primeiros
-  // `dias` pontos sao o anterior, alinhados dia a dia com o atual.
-  const pontos = serie.rows.map((d) => ({
+  // Os dois periodos tem o mesmo numero de dias: alinhados por posicao.
+  const ponto = (d: { dia: string; quantidade: number; valor: number }) => ({
     dia: d.dia, quantidade: Number(d.quantidade), valor: Number(d.valor),
-  }));
-  const anterior = pontos.slice(0, periodo.dias);
-  const atual = pontos.slice(periodo.dias);
+  });
+  const anterior = serie.rows.filter((d) => !d.atual).map(ponto);
+  const atual = serie.rows.filter((d) => d.atual).map(ponto);
 
   const linhas = produtos.rows;
   const faturamento = linhas.reduce((s, l) => s + l.valor, 0);

@@ -174,6 +174,8 @@ interface ProdutoDash {
 interface Dash {
   periodo: { inicio: string; fim: string; dias: number };
   periodo_anterior: { inicio: string; fim: string };
+  comparar: Comparar;
+  ultima_venda: string | null;
   quantidade_vendida: number; faturamento: number; documentos: number;
   produtos_com_venda: number; demanda_media_diaria: number; demanda_media_mensal: number;
   quantidade_anterior: number; faturamento_anterior: number; variacao_percentual: number | null;
@@ -210,6 +212,7 @@ const CORES_CURVA: Record<string, string> = { A: '#2f5220', B: '#5f8a46', C: '#a
 const NOME_CURVA: Record<string, string> = { A: 'Curva A', B: 'Curva B', C: 'Curva C', SEM: 'Sem curva' };
 
 type Medida = 'valor' | 'quantidade';
+type Comparar = 'anterior' | 'ano_anterior';
 
 /**
  * Agrupa a serie diaria em semanas quando o periodo passa de ~4 meses: 365
@@ -252,12 +255,13 @@ function PainelDashboard({ periodo, setPeriodo, irPara }: {
   const [carregando, setCarregando] = useState(true);
   const [tentativa, setTentativa] = useState(0);
   const [medida, setMedida] = useState<Medida>('valor');
+  const [comparar, setComparar] = useState<Comparar>('anterior');
   const [produtoAberto, setProdutoAberto] = useState<number | null>(null);
 
   useEffect(() => {
     setCarregando(true);
     Promise.all([
-      api<Dash>('/demanda/dashboard', { query: paramsPeriodo(periodo) }),
+      api<Dash>('/demanda/dashboard', { query: { ...paramsPeriodo(periodo), comparar } }),
       perfil ? Promise.resolve({ data: perfil }) : api<PerfilTemporal>('/demanda/perfil-temporal', { query: { dias: 1100 } }),
     ])
       .then(([d, p]) => { setDash(d.data); setPerfil(p.data); setErro(null); })
@@ -265,18 +269,42 @@ function PainelDashboard({ periodo, setPeriodo, irPara }: {
       .finally(() => setCarregando(false));
     // O perfil (24 meses, dia da semana) nao depende do periodo: busca uma vez.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [periodo, tentativa]);
+  }, [periodo, comparar, tentativa]);
 
+  // As datas so sao mostradas quando correspondem ao filtro escolhido: durante
+  // o carregamento, o periodo antigo na tela faria parecer que o filtro errou.
   const filtro = (
     <div className="painel-filtro">
-      <FiltroPeriodo periodo={periodo} aoMudar={setPeriodo} chips />
-      {dash && (
-        <span className="painel-filtro__nota">
-          Comparando com {fmtData(dash.periodo_anterior.inicio)} a {fmtData(dash.periodo_anterior.fim)}
-        </span>
-      )}
+      <div className="painel-filtro__controles">
+        <FiltroPeriodo periodo={periodo} aoMudar={setPeriodo} chips />
+        <div className="painel-filtro__comparar">
+          <span>Comparar com</span>
+          <div className="alternador" role="group" aria-label="Base de comparacao">
+            {([['anterior', 'Dias anteriores'], ['ano_anterior', 'Mesmo periodo do ano passado']] as const).map(([v, t]) => (
+              <button key={v} type="button" aria-pressed={comparar === v}
+                className={comparar === v ? 'ativo' : undefined} onClick={() => setComparar(v)}>
+                {t}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+      <p className="painel-filtro__nota" aria-live="polite">
+        {carregando || !dash ? 'Calculando o periodo...' : (
+          <>
+            Vendas de <strong>{fmtData(dash.periodo.inicio)} a {fmtData(dash.periodo.fim)}</strong>
+            {' '}({dash.periodo.dias} {dash.periodo.dias === 1 ? 'dia' : 'dias'}), comparadas
+            com <strong>{fmtData(dash.periodo_anterior.inicio)} a {fmtData(dash.periodo_anterior.fim)}</strong>.
+            {periodo.dias !== 'PERSONALIZADO' && dash.ultima_venda && (
+              <> Os periodos contam a partir da ultima venda importada, em {fmtData(dash.ultima_venda)}.</>
+            )}
+          </>
+        )}
+      </p>
     </div>
   );
+  const nomeBase = comparar === 'ano_anterior' ? 'ao mesmo periodo do ano passado' : 'aos dias anteriores';
+  const sufixoBase = comparar === 'ano_anterior' ? 'vs ano passado' : 'vs periodo anterior';
 
   if (erro && !dash) {
     return (
@@ -319,9 +347,9 @@ function PainelDashboard({ periodo, setPeriodo, irPara }: {
         ? `embalagens que deixaram de vender, cerca de ${moeda(dash.valor_reprimido_estimado)}`
         : 'estimativa do que deixou de vender sem estoque', aba: 'ruptura' },
     { nome: 'Em queda', valor: dash.produtos_em_queda, texto: numero(dash.produtos_em_queda),
-      tom: 'alerta', explica: 'venderam menos que no periodo anterior', aba: 'analise' },
+      tom: 'alerta', explica: 'venderam menos que na comparacao', aba: 'analise' },
     { nome: 'Em alta', valor: dash.produtos_em_alta, texto: numero(dash.produtos_em_alta),
-      tom: 'ok', explica: 'venderam mais que no periodo anterior', aba: 'analise' },
+      tom: 'ok', explica: 'venderam mais que na comparacao', aba: 'analise' },
     { nome: 'Sazonais', valor: dash.produtos_sazonais, texto: numero(dash.produtos_sazonais),
       tom: 'info', explica: 'com indice sazonal confirmado', aba: 'sazonalidade' },
   ];
@@ -350,10 +378,10 @@ function PainelDashboard({ periodo, setPeriodo, irPara }: {
               <span className="kpi-heroi__valor" title={moeda(dash.faturamento)}>
                 <Contagem valor={dash.faturamento} formatar={reaisHeroi} />
               </span>
-              <Delta valor={variacao(dash.faturamento, dash.faturamento_anterior)} />
+              <Delta valor={variacao(dash.faturamento, dash.faturamento_anterior)} sufixo={sufixoBase} />
               <span className="kpi__nota">
                 {moeda(dash.faturamento)} de {fmtData(dash.periodo.inicio)} a {fmtData(dash.periodo.fim)}
-                {' '}({dash.periodo.dias} dias). No periodo anterior: {moeda(dash.faturamento_anterior)}.
+                {' '}({dash.periodo.dias} dias). Na comparacao: {moeda(dash.faturamento_anterior)}.
               </span>
             </div>
             <div className="kpi">
@@ -385,7 +413,7 @@ function PainelDashboard({ periodo, setPeriodo, irPara }: {
 
           {/* ------------------------------------------- serie atual x anterior */}
           <Cartao
-            titulo={semanal ? 'Venda por semana, comparada ao periodo anterior' : 'Venda por dia, comparada ao periodo anterior'}
+            titulo={`Venda por ${semanal ? 'semana' : 'dia'}, comparada ${nomeBase}`}
             acoes={(
               <div className="alternador" role="group" aria-label="Medida do grafico">
                 {(['valor', 'quantidade'] as const).map((m) => (
@@ -500,7 +528,7 @@ function PainelDashboard({ periodo, setPeriodo, irPara }: {
 
             <Cartao titulo="Maiores altas e quedas em faturamento">
               {dash.maiores_altas.length + dash.maiores_quedas.length === 0 ? (
-                <Vazio>Sem periodo anterior para comparar.</Vazio>
+                <Vazio>Sem vendas no periodo de comparacao.</Vazio>
               ) : (
                 <Divergente
                   aoClicar={(id) => setProdutoAberto(Number(id))}
@@ -512,7 +540,7 @@ function PainelDashboard({ periodo, setPeriodo, irPara }: {
                   }))}
                 />
               )}
-              <p className="fraco nota-grafico">Diferenca em reais contra o periodo anterior. Clique para abrir o produto.</p>
+              <p className="fraco nota-grafico">Diferenca em reais contra o periodo de comparacao. Clique para abrir o produto.</p>
             </Cartao>
           </div>
         </>

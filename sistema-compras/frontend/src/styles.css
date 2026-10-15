@@ -865,10 +865,13 @@ table.tabela .codigo { font-family: var(--fonte-mono); font-size: 12px; color: v
 }
 @keyframes progresso { from { transform: translateX(-100%); } to { transform: translateX(290%); } }
 
-.painel-filtro { display: flex; align-items: center; gap: 8px 16px; flex-wrap: wrap; }
+.painel-filtro { display: grid; gap: 8px; min-width: 0; }
+.painel-filtro__controles { display: flex; align-items: center; gap: 8px 20px; flex-wrap: wrap; min-width: 0; }
+.painel-filtro__comparar { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--texto-2); min-width: 0; flex-wrap: wrap; }
 .painel-filtro .campo { margin: 0; }
 .painel-filtro .chips-periodo { min-width: 0; max-width: 100%; overflow-x: auto; scrollbar-width: none; }
-.painel-filtro__nota { color: var(--texto-3); font-size: 12.5px; }
+.painel-filtro__nota { margin: 0; color: var(--texto-2); font-size: 13px; max-width: 110ch; }
+.painel-filtro__nota strong { color: var(--texto); font-weight: 600; }
 
 .chips-periodo, .alternador {
   display: inline-flex; padding: 3px; gap: 2px; border-radius: 8px;

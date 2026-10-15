@@ -18,6 +18,8 @@ export const filtroPeriodoSchema = z.object({
   classificacao_abc: z.enum(['A', 'B', 'C']).optional(),
   classificacao_xyz: z.enum(['X', 'Y', 'Z']).optional(),
   incluir_devolucoes: z.coerce.boolean().default(true),
+  /** Base da variacao: os dias imediatamente antes, ou as mesmas datas um ano atras. */
+  comparar: z.enum(['anterior', 'ano_anterior']).default('anterior'),
 });
 
 export type FiltroPeriodo = z.output<typeof filtroPeriodoSchema>;
