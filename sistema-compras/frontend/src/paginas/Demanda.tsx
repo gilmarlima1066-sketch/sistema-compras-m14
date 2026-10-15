@@ -3,7 +3,7 @@ import { api, ErroApi } from '../api/client';
 import { useAuth } from '../auth/AuthContext';
 import { useLista } from '../hooks/useLista';
 import { CabecalhoPagina } from '../componentes/Cabecalho';
-import { ImportarVendas } from '../componentes/ImportarVendas';
+import { CONFIG_VENDAS, ImportarPlanilha } from '../componentes/ImportarPlanilha';
 import {
   Aviso, Cartao, Entrada, Etiqueta, Indicador, Modal, Paginacao, Selecao, Vazio,
   data as fmtData, dataHora, moeda, numero,
@@ -62,7 +62,7 @@ export function Demanda() {
       <CabecalhoPagina
         titulo="Demanda"
         descricao="Historico de vendas, demanda, sazonalidade e previsao. Alimenta o planejamento de compras."
-        acoes={podeImportar ? <ImportarVendas aoConcluir={() => setVersao((v) => v + 1)} /> : undefined}
+        acoes={podeImportar ? <ImportarPlanilha config={CONFIG_VENDAS} aoConcluir={() => setVersao((v) => v + 1)} /> : undefined}
       />
 
       <nav className="abas">

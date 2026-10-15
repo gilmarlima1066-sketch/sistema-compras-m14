@@ -4,6 +4,7 @@ import type { OpcaoCadastro, PosicaoEstoque } from '../api/tipos';
 import { useAuth } from '../auth/AuthContext';
 import { useLista } from '../hooks/useLista';
 import { CabecalhoPagina } from '../componentes/Cabecalho';
+import { CONFIG_ESTOQUE, ImportarPlanilha } from '../componentes/ImportarPlanilha';
 import {
   Aviso, Cartao, Entrada, Etiqueta, Modal, Paginacao, Selecao, Vazio, data, dataHora, numero,
 } from '../componentes/ui';
@@ -83,6 +84,9 @@ export function Estoque() {
       <CabecalhoPagina
         titulo="Posicao de estoque"
         descricao="Saldo por SKU com cobertura em dias e situacao frente aos parametros de reposicao."
+        acoes={pode('estoque.movimentar') || pode('integracao.importar')
+          ? <ImportarPlanilha config={CONFIG_ESTOQUE} aoConcluir={recarregar} />
+          : undefined}
       />
 
       <div className="filtros">

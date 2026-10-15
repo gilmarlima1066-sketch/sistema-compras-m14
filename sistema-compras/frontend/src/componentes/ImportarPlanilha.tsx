@@ -1,11 +1,11 @@
 /**
- * Botao "Importar vendas" da tela de Demanda: o Rel 7104 do ERP vira historico
- * de vendas e alimenta dashboard, analise, previsao e o painel de compras.
+ * Botao de importacao de planilha do ERP, usado em Demanda (vendas, Rel 7104) e
+ * em Estoque (saldo, Rel 9054). Cada tela passa a sua configuracao.
  *
  * Fluxo, todo numa janela:
  *   escolher arquivo -> leitura no navegador (Web Worker) -> conferencia
- *   (colunas, periodo, amostra validada no servidor) -> confirmacao ->
- *   gravacao em lotes com progresso -> atualizacao das analises -> resultado.
+ *   (colunas, resumo, amostra validada no servidor) -> confirmacao ->
+ *   gravacao em lotes com progresso -> pos-processamento -> resultado.
  *
  * Nada e gravado antes da confirmacao.
  */
@@ -17,33 +17,28 @@ import {
 } from '../importacao/importador';
 import { Aviso, Indicador, Modal, data, numero } from './ui';
 
-const TEMPLATE = 'REL7104_VENDAS';
+interface Dado { rotulo: string; valor: string; nota?: string }
 
-/** Colunas que o gravador de vendas le. As demais nao viajam ate o servidor. */
-const COLUNAS_USADAS = [
-  'DTFATURAMENTO', 'CODPRODUTO', 'DESCRICAO', 'QTDE', 'TOTAL', 'VALORMEDIO',
-  'FANTASIA', 'CIDADE', 'ESTADO', 'APELIDO', 'NUMNF', 'SUBGRUPO', 'SITUACAO',
-  'ID_CIENTE', 'TIPO',
-];
-const OBRIGATORIAS = ['DTFATURAMENTO', 'CODPRODUTO', 'QTDE', 'TOTAL', 'NUMNF', 'ID_CIENTE'];
-
-type Etapa = 'escolher' | 'lendo' | 'conferir' | 'gravando' | 'atualizando' | 'concluido';
-
-interface Conferencia {
-  importacaoId: number;
-  linhas: number;
-  emBranco: number;
-  periodo: { de: string; ate: string } | null;
-  produtos: number;
-  notas: number;
-  devolucoes: number;
-  jaImportado: { em: string; registros: number } | null;
-  impedimentos: string[];
-  validacao: { validas: number; com_erro: number; ocorrencias: Array<{ regra: string; total: number; exemplo: string }> };
+export interface ConfigImportacao {
+  entidade: string;
+  template: string;
+  botao: string;
+  titulo: string;
+  /** Colunas que o gravador le. As demais nao viajam ate o servidor. */
+  colunasUsadas: string[];
+  obrigatorias: string[];
+  instrucao: string;
+  aviso: string;
+  sucesso: string;
+  /** Rotulos dos quatro contadores do resultado. */
+  contadores: [string, string, string, string];
+  notaDescartadas: string;
+  resumir: (p: PlanilhaLida) => Dado[];
 }
 
-const erroDe = (e: unknown) =>
-  (e instanceof ErroApi || e instanceof Error ? e.message : 'Falha inesperada');
+const idx = (p: PlanilhaLida, nome: string) =>
+  p.colunas.findIndex((c) => canonico(c) === nome);
+const num = (v: unknown) => Number(String(v ?? '').replace(',', '.')) || 0;
 
 /** "05/01/2026" -> "2026-01-05"; outros formatos voltam como vieram. */
 const isoDe = (v: unknown) => {
@@ -52,40 +47,128 @@ const isoDe = (v: unknown) => {
   return m ? `${m[3]}-${m[2]}-${m[1]}` : s.slice(0, 10);
 };
 
-function resumir(p: PlanilhaLida) {
-  const idx = (nome: string) => p.colunas.findIndex((c) => canonico(c) === nome);
-  const iData = idx('DTFATURAMENTO');
-  const iProd = idx('CODPRODUTO');
-  const iNf = idx('NUMNF');
-  const iCli = idx('IDCIENTE');
-  const iTipo = idx('TIPO');
+export const CONFIG_VENDAS: ConfigImportacao = {
+  entidade: 'vendas',
+  template: 'REL7104_VENDAS',
+  botao: 'Importar vendas',
+  titulo: 'Importar vendas (Rel 7104)',
+  colunasUsadas: [
+    'DTFATURAMENTO', 'CODPRODUTO', 'DESCRICAO', 'QTDE', 'TOTAL', 'VALORMEDIO',
+    'FANTASIA', 'CIDADE', 'ESTADO', 'APELIDO', 'NUMNF', 'SUBGRUPO', 'SITUACAO',
+    'ID_CIENTE', 'TIPO',
+  ],
+  obrigatorias: ['DTFATURAMENTO', 'CODPRODUTO', 'QTDE', 'TOTAL', 'NUMNF', 'ID_CIENTE'],
+  instrucao: 'Selecione o Rel 7104 exportado do ERP (XLSX, XLS ou CSV), com as colunas '
+    + 'DTFATURAMENTO, CODPRODUTO, QTDE, TOTAL, NUMNF, ID_CIENTE e as demais do relatorio. '
+    + 'O arquivo e lido no navegador e enviado em partes, entao pode ter centenas de '
+    + 'milhares de linhas. Nada e gravado antes da sua confirmacao.',
+  aviso: 'Notas que ja existem sao atualizadas, nunca duplicadas. Produtos que ainda nao '
+    + 'estao cadastrados entram com a categoria do SUBGRUPO. Mantenha esta janela aberta '
+    + 'ate o fim.',
+  sucesso: 'Vendas importadas. O historico, o dashboard, a previsao e o painel de compras '
+    + 'ja usam os novos dados.',
+  contadores: ['Notas novas', 'Notas atualizadas', 'Descartadas', 'Rejeitadas'],
+  notaDescartadas: 'Devolucoes',
+  resumir: (p) => {
+    const iData = idx(p, 'DTFATURAMENTO');
+    const iProd = idx(p, 'CODPRODUTO');
+    const iNf = idx(p, 'NUMNF');
+    const iCli = idx(p, 'IDCIENTE');
+    const iTipo = idx(p, 'TIPO');
+    let de = '';
+    let ate = '';
+    let devolucoes = 0;
+    const produtos = new Set<string>();
+    const notas = new Set<string>();
+    for (const l of p.linhas) {
+      const d = isoDe(l[iData]);
+      if (d && (!de || d < de)) de = d;
+      if (d && (!ate || d > ate)) ate = d;
+      produtos.add(String(l[iProd]));
+      notas.add(`${l[iNf]}/${l[iCli]}/${d}`);
+      if (String(l[iTipo] ?? '').trim().toUpperCase() === 'DEVOLUCAO') devolucoes++;
+    }
+    return [
+      { rotulo: 'Periodo', valor: de ? `${data(de)} a ${data(ate)}` : '—' },
+      { rotulo: 'Notas', valor: numero(notas.size) },
+      { rotulo: 'Produtos', valor: numero(produtos.size) },
+      { rotulo: 'Devolucoes', valor: numero(devolucoes), nota: 'Descartadas por configuracao' },
+    ];
+  },
+};
 
-  let de = '';
-  let ate = '';
-  let devolucoes = 0;
-  const produtos = new Set<string>();
-  const notas = new Set<string>();
-  for (const l of p.linhas) {
-    const d = isoDe(l[iData]);
-    if (d && (!de || d < de)) de = d;
-    if (d && (!ate || d > ate)) ate = d;
-    produtos.add(String(l[iProd]));
-    notas.add(`${l[iNf]}/${l[iCli]}/${d}`);
-    if (String(l[iTipo] ?? '').trim().toUpperCase() === 'DEVOLUCAO') devolucoes++;
-  }
-  return { periodo: de ? { de, ate } : null, produtos: produtos.size, notas: notas.size, devolucoes };
+export const CONFIG_ESTOQUE: ConfigImportacao = {
+  entidade: 'estoque',
+  template: 'REL9054_ESTOQUE',
+  botao: 'Importar estoque',
+  titulo: 'Importar estoque (Rel 9054)',
+  colunasUsadas: ['CODPRODUTO', 'DESCRICAO', 'CODBARRAS', 'UNIDADE', 'SITUACAO', 'QTDE', 'QTDEVENDIDA'],
+  obrigatorias: ['CODPRODUTO', 'QTDE'],
+  instrucao: 'Selecione o Rel 9054 (saldo de estoque) exportado do ERP, com as colunas '
+    + 'CODPRODUTO, DESCRICAO, CODBARRAS, UNIDADE, SITUACAO, QTDE e QTDEVENDIDA. O arquivo '
+    + 'substitui a posicao anterior do ERP: so a diferenca entra como ajuste de inventario. '
+    + 'Nada e gravado antes da sua confirmacao.',
+  aviso: 'Produtos que ainda nao existem sao cadastrados na categoria "A CLASSIFICAR (ERP)". '
+    + 'O saldo disponivel e QTDE menos QTDEVENDIDA. Importar o mesmo arquivo de novo nao '
+    + 'gera ajuste. Mantenha esta janela aberta ate o fim.',
+  sucesso: 'Estoque atualizado no local "ERP". O painel de compras e o planejamento ja usam '
+    + 'o novo saldo; cada diferenca ficou registrada como ajuste de inventario.',
+  contadores: ['Saldos novos', 'Saldos atualizados', 'Sem alteracao', 'Rejeitados'],
+  notaDescartadas: 'Sem saldo ou igual ao anterior',
+  resumir: (p) => {
+    const iProd = idx(p, 'CODPRODUTO');
+    const iQtde = idx(p, 'QTDE');
+    const iVend = idx(p, 'QTDEVENDIDA');
+    const iSit = idx(p, 'SITUACAO');
+    let comSaldo = 0;
+    let ativos = 0;
+    let unidades = 0;
+    let reservado = 0;
+    const produtos = new Set<string>();
+    for (const l of p.linhas) {
+      produtos.add(String(l[iProd]));
+      const q = num(l[iQtde]);
+      if (q > 0) { comSaldo++; unidades += q; }
+      reservado += Math.abs(num(l[iVend]));
+      if (String(l[iSit] ?? '').trim().toUpperCase() === 'ATIVO') ativos++;
+    }
+    return [
+      { rotulo: 'Produtos', valor: numero(produtos.size) },
+      { rotulo: 'Com saldo', valor: numero(comSaldo), nota: `${numero(unidades)} unidades` },
+      { rotulo: 'Ativos no ERP', valor: numero(ativos) },
+      { rotulo: 'Vendido nao faturado', valor: numero(reservado), nota: 'Vira reservado' },
+    ];
+  },
+};
+
+type Etapa = 'escolher' | 'lendo' | 'conferir' | 'gravando' | 'atualizando' | 'concluido';
+
+interface Conferencia {
+  importacaoId: number;
+  linhas: number;
+  emBranco: number;
+  resumo: Dado[];
+  jaImportado: { em: string; registros: number } | null;
+  impedimentos: string[];
+  validacao: { validas: number; com_erro: number; ocorrencias: Array<{ regra: string; total: number; exemplo: string }> };
 }
 
-export function ImportarVendas({ aoConcluir }: { aoConcluir: () => void }) {
+const erroDe = (e: unknown) =>
+  (e instanceof ErroApi || e instanceof Error ? e.message : 'Falha inesperada');
+
+export function ImportarPlanilha({ config, aoConcluir }: {
+  config: ConfigImportacao; aoConcluir: () => void;
+}) {
   const [aberto, setAberto] = useState(false);
 
   return (
     <>
       <button type="button" className="botao botao--primario" onClick={() => setAberto(true)}>
-        Importar vendas
+        {config.botao}
       </button>
       {aberto && (
         <Assistente
+          config={config}
           aoFechar={(importou) => { setAberto(false); if (importou) aoConcluir(); }}
         />
       )}
@@ -93,7 +176,9 @@ export function ImportarVendas({ aoConcluir }: { aoConcluir: () => void }) {
   );
 }
 
-function Assistente({ aoFechar }: { aoFechar: (importou: boolean) => void }) {
+function Assistente({ config, aoFechar }: {
+  config: ConfigImportacao; aoFechar: (importou: boolean) => void;
+}) {
   const [etapa, setEtapa] = useState<Etapa>('escolher');
   const [arquivo, setArquivo] = useState<File | null>(null);
   const [mensagem, setMensagem] = useState('');
@@ -120,18 +205,18 @@ function Assistente({ aoFechar }: { aoFechar: (importou: boolean) => void }) {
     try {
       const p = await lerPlanilha(arquivo, setMensagem);
       const presentes = new Set(p.colunas.map(canonico));
-      const faltando = OBRIGATORIAS.filter((c) => !presentes.has(canonico(c)));
+      const faltando = config.obrigatorias.filter((c) => !presentes.has(canonico(c)));
       if (faltando.length) {
-        throw new Error(`O arquivo nao parece um Rel 7104: faltam as colunas ${faltando.join(', ')}.`);
+        throw new Error(`O arquivo nao parece o relatorio esperado: faltam as colunas ${faltando.join(', ')}.`);
       }
-      if (!p.linhas.length) throw new Error('Nenhuma linha de venda no arquivo.');
+      if (!p.linhas.length) throw new Error('Nenhuma linha de dados no arquivo.');
 
       setMensagem('Conferindo com o servidor...');
       const amostra = p.linhas.slice(0, 100).map((l) => linhaParaObjeto(p.colunas, l));
       const { data: analise } = await api<any>('/integracoes/importacoes/iniciar-client', {
         metodo: 'POST',
         corpo: {
-          nome_arquivo: arquivo.name, entidade: 'vendas', template: TEMPLATE,
+          nome_arquivo: arquivo.name, entidade: config.entidade, template: config.template,
           colunas: p.colunas, amostra, total_linhas: p.linhas.length,
         },
       });
@@ -151,7 +236,7 @@ function Assistente({ aoFechar }: { aoFechar: (importou: boolean) => void }) {
         importacaoId: analise.importacao_id,
         linhas: p.linhas.length,
         emBranco: p.emBranco,
-        ...resumir(p),
+        resumo: config.resumir(p),
         jaImportado: analise.ja_importado ?? null,
         impedimentos: analise.impedimentos ?? [],
         validacao,
@@ -170,12 +255,14 @@ function Assistente({ aoFechar }: { aoFechar: (importou: boolean) => void }) {
     try {
       await api(`/integracoes/importacoes/${conf.importacaoId}/confirmar`, { metodo: 'POST', corpo: {} });
       const r = await gravarEmLotes({
-        importacaoId: conf.importacaoId, planilha, colunasUsadas: COLUNAS_USADAS,
+        importacaoId: conf.importacaoId, planilha, colunasUsadas: config.colunasUsadas,
         aoProgredir: setProgresso,
       });
       setPlanilha(null); // libera a memoria das linhas
-      setEtapa('atualizando');
-      await posProcessar(conf.importacaoId);
+      if (r.pos_processar) {
+        setEtapa('atualizando');
+        await posProcessar(conf.importacaoId);
+      }
       setResultado(r);
       setEtapa('concluido');
     } catch (e) {
@@ -188,7 +275,7 @@ function Assistente({ aoFechar }: { aoFechar: (importou: boolean) => void }) {
 
   return (
     <Modal
-      titulo="Importar vendas (Rel 7104)"
+      titulo={config.titulo}
       largo
       aoFechar={() => { if (!ocupado) aoFechar(etapa === 'concluido' && !!resultado); }}
       rodape={(
@@ -222,12 +309,7 @@ function Assistente({ aoFechar }: { aoFechar: (importou: boolean) => void }) {
 
       {etapa === 'escolher' && (
         <>
-          <p className="fraco">
-            Selecione o Rel 7104 exportado do ERP (XLSX, XLS ou CSV), com as colunas DTFATURAMENTO,
-            CODPRODUTO, QTDE, TOTAL, NUMNF, ID_CIENTE e as demais do relatorio. O arquivo e lido no
-            navegador e enviado em partes, entao pode ter centenas de milhares de linhas. Nada e
-            gravado antes da sua confirmacao.
-          </p>
+          <p className="fraco">{config.instrucao}</p>
           <input type="file" accept=".xlsx,.xls,.csv,.txt"
             onChange={(e) => setArquivo(e.target.files?.[0] ?? null)} />
           {arquivo && (
@@ -251,14 +333,11 @@ function Assistente({ aoFechar }: { aoFechar: (importou: boolean) => void }) {
             </Aviso>
           )}
           <div className="grade-indicadores">
-            <Indicador rotulo="Linhas de venda" valor={numero(conf.linhas)}
+            <Indicador rotulo="Linhas" valor={numero(conf.linhas)}
               nota={conf.emBranco ? `${numero(conf.emBranco)} linhas em branco ignoradas` : undefined} />
-            <Indicador rotulo="Periodo"
-              valor={conf.periodo ? `${data(conf.periodo.de)} a ${data(conf.periodo.ate)}` : '—'} />
-            <Indicador rotulo="Notas" valor={numero(conf.notas)} />
-            <Indicador rotulo="Produtos" valor={numero(conf.produtos)} />
-            <Indicador rotulo="Devolucoes" valor={numero(conf.devolucoes)}
-              nota="Descartadas por configuracao" />
+            {conf.resumo.map((d) => (
+              <Indicador key={d.rotulo} rotulo={d.rotulo} valor={d.valor} nota={d.nota} />
+            ))}
             <Indicador rotulo="Amostra validada"
               valor={`${numero(conf.validacao.validas)} ok`}
               tom={conf.validacao.com_erro > 0 ? 'alerta' : 'acento'}
@@ -275,10 +354,7 @@ function Assistente({ aoFechar }: { aoFechar: (importou: boolean) => void }) {
               </tbody>
             </table>
           )}
-          <p className="fraco">
-            Notas que ja existem sao atualizadas, nunca duplicadas. Produtos que ainda nao estao
-            cadastrados entram com a categoria do SUBGRUPO. Mantenha esta janela aberta ate o fim.
-          </p>
+          <p className="fraco">{config.aviso}</p>
         </>
       )}
 
@@ -310,15 +386,13 @@ function Assistente({ aoFechar }: { aoFechar: (importou: boolean) => void }) {
 
       {etapa === 'concluido' && resultado && (
         <>
-          <Aviso tipo="ok">
-            Vendas importadas. O historico, o dashboard, a previsao e o painel de compras ja usam
-            os novos dados.
-          </Aviso>
+          <Aviso tipo="ok">{config.sucesso}</Aviso>
           <div className="grade-indicadores">
-            <Indicador rotulo="Notas novas" valor={numero(resultado.criados)} tom="acento" />
-            <Indicador rotulo="Notas atualizadas" valor={numero(resultado.atualizados)} />
-            <Indicador rotulo="Descartadas" valor={numero(resultado.descartados)} nota="Devolucoes" />
-            <Indicador rotulo="Rejeitadas" valor={numero(resultado.rejeitados)}
+            <Indicador rotulo={config.contadores[0]} valor={numero(resultado.criados)} tom="acento" />
+            <Indicador rotulo={config.contadores[1]} valor={numero(resultado.atualizados)} />
+            <Indicador rotulo={config.contadores[2]} valor={numero(resultado.descartados)}
+              nota={config.notaDescartadas} />
+            <Indicador rotulo={config.contadores[3]} valor={numero(resultado.rejeitados)}
               tom={resultado.rejeitados > 0 ? 'perigo' : 'neutro'} />
           </div>
           {Object.keys(resultado.motivos ?? {}).length > 0 && (
