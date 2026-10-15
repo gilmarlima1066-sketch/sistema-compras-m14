@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { criado, ok, rota } from '../../core/http.js';
 import { validar } from '../../core/validate.js';
-import { paginacaoSchema } from '../../core/paginacao.js';
+import { metaPaginacao, paginacaoSchema } from '../../core/paginacao.js';
 import { autenticar } from '../../middlewares/autenticar.js';
 import { exigirPermissao } from '../../middlewares/autorizar.js';
 import * as demanda from './demanda.service.js';
@@ -178,7 +178,7 @@ demandaRouter.get('/ruptura', LER, rota(async (req, res) => {
   const filtro = validar(req, 'query', analiseDemandaSchema);
   const resultado = await analise.analisarRuptura(filtro);
   return ok(res, resultado.dados, 'Produtos com dias em ruptura', {
-    periodo: resultado.periodo, aviso: resultado.aviso,
+    ...metaPaginacao(resultado.total, filtro), periodo: resultado.periodo, aviso: resultado.aviso,
   });
 }));
 

@@ -298,16 +298,28 @@ export async function analisarRuptura(filtro: FiltroPeriodo & Paginacao) {
     dias AS (
       SELECT generate_series($1::date, $2::date, '1 day')::date AS dia
     ),
-    reconstruido AS (
-      -- Saldo no fim do dia = saldo de hoje menos tudo que se movimentou depois dele.
-      SELECT p.id AS produto_id, d.dia,
-             coalesce(sa.saldo, 0)
-               - coalesce((SELECT sum(mv.delta) FROM movimentos mv
-                            WHERE mv.produto_id = p.id AND mv.dia > d.dia), 0) AS saldo
+    grade AS (
+      SELECT p.id AS produto_id, d.dia, coalesce(mv.delta, 0) AS delta
         FROM produtos p
         CROSS JOIN dias d
-        LEFT JOIN saldo_atual sa ON sa.produto_id = p.id
+        LEFT JOIN movimentos mv ON mv.produto_id = p.id AND mv.dia = d.dia
         ${onde}
+    ),
+    apos_periodo AS (
+      SELECT produto_id, sum(delta) AS total FROM movimentos WHERE dia > $2::date GROUP BY produto_id
+    ),
+    reconstruido AS (
+      -- Saldo no fim do dia = saldo de hoje menos tudo que se movimentou depois
+      -- dele. A soma acumulada (janela) faz isso numa passada; a subconsulta por
+      -- produto e por dia levava segundos com poucos milhares de produtos.
+      SELECT g.produto_id, g.dia,
+             coalesce(sa.saldo, 0) - coalesce(ap.total, 0)
+               - coalesce(sum(g.delta) OVER (
+                   PARTITION BY g.produto_id ORDER BY g.dia DESC
+                   ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING), 0) AS saldo
+        FROM grade g
+        LEFT JOIN saldo_atual sa ON sa.produto_id = g.produto_id
+        LEFT JOIN apos_periodo ap ON ap.produto_id = g.produto_id
     ),
     agregado AS (
       SELECT r.produto_id,
@@ -333,7 +345,8 @@ export async function analisarRuptura(filtro: FiltroPeriodo & Paginacao) {
            coalesce(v.dias_com_venda, 0) AS dias_com_venda,
            CASE WHEN a.dias_disponivel > 0
                 THEN coalesce(v.quantidade, 0) / a.dias_disponivel END AS media_dias_disponiveis,
-           (tm.produto_id IS NOT NULL) AS base_confiavel
+           (tm.produto_id IS NOT NULL) AS base_confiavel,
+           count(*) OVER () AS total_geral
       FROM agregado a
       JOIN produtos p ON p.id = a.produto_id
       LEFT JOIN vendas v ON v.produto_id = a.produto_id
@@ -344,10 +357,12 @@ export async function analisarRuptura(filtro: FiltroPeriodo & Paginacao) {
     [...valores, filtro.limite, deslocamento(filtro)]);
 
   const semBase = rows.filter((r) => !r.base_confiavel).length;
+  const total = rows.length ? Number(rows[0].total_geral) : 0;
 
   return {
     periodo,
-    dados: rows,
+    total,
+    dados: rows.map(({ total_geral: _t, ...r }) => r),
     aviso: semBase
       ? `${semBase} produto(s) sem movimentacao de estoque registrada: a ruptura foi inferida apenas do saldo atual e nao deve ser tratada como historico`
       : null,

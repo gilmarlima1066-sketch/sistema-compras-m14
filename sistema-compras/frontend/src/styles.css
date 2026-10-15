@@ -760,3 +760,135 @@ table.tabela .codigo { font-family: var(--fonte-mono); font-size: 12px; color: v
   .tarefa__cabecalho { flex-direction: column; }
   .tarefa__rodape { flex-direction: column; align-items: flex-start; }
 }
+
+/* ======================================================= estoque e demanda
+   Faixas de cobertura: do vermelho de "acabou" ao azul de "sobrando". O ocre
+   de "atencao" e a cor do grao; o verde e o acento do sistema. */
+
+:root {
+  --faixa-zerado: #8f2a22;
+  --faixa-critico: #c0531f;
+  --faixa-atencao: #b8892a;
+  --faixa-adequado: #3f6b2b;
+  --faixa-excesso: #2f5f78;
+  --faixa-sem-giro: #a7ad9f;
+  --faixa-sem-movimento: #d3d7cc;
+}
+
+.secao-titulo { font-size: 17px; font-weight: 600; letter-spacing: -0.01em; }
+.secao-sub { color: var(--texto-2); margin: 2px 0 0; font-size: 13px; }
+
+/* --- silo: a barra unica com todos os produtos por faixa ---------------- */
+
+.silo {
+  background: var(--superficie);
+  border: 1px solid var(--borda);
+  border-radius: var(--raio);
+  padding: 18px 20px 16px;
+  margin-bottom: 16px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 240px;
+  gap: 8px 32px;
+}
+.silo__cabeca { grid-column: 1 / -1; display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+.silo__barra {
+  display: flex;
+  height: 40px;
+  border-radius: 4px;
+  overflow: hidden;
+  margin: 10px 0 12px;
+  gap: 2px;
+}
+.silo__segmento {
+  border: 0;
+  padding: 0;
+  min-width: 4px;
+  cursor: pointer;
+  transition: opacity .15s, filter .15s;
+}
+.silo__segmento:hover { filter: brightness(1.08); }
+.silo--filtrado .silo__segmento:not(.silo__segmento--ativo) { opacity: .28; }
+.silo__legenda { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(104px, 1fr)); gap: 4px 8px; }
+.silo__item {
+  display: grid;
+  grid-template-columns: 10px 1fr;
+  column-gap: 8px;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: var(--raio);
+  padding: 6px 8px;
+  cursor: pointer;
+}
+.silo__item:hover { background: var(--superficie-2); border-color: var(--borda); }
+.silo__item--ativo { background: var(--superficie-2); border-color: var(--borda-forte); }
+.silo__cor { width: 10px; height: 10px; border-radius: 2px; margin-top: 4px; }
+.silo__nome { font-weight: 600; font-size: 13px; }
+.silo__qtd { grid-column: 2; font-family: var(--fonte-mono); font-variant-numeric: tabular-nums; font-size: 18px; line-height: 1.2; }
+.silo__regra { grid-column: 2; color: var(--texto-3); font-size: 11.5px; }
+.silo__valores { border-left: 1px solid var(--borda); padding-left: 24px; display: grid; align-content: start; gap: 14px; margin-top: 10px; }
+.silo__valores dt { color: var(--texto-2); font-size: 12.5px; }
+.silo__valores dd { margin: 2px 0 0; font-family: var(--fonte-mono); font-variant-numeric: tabular-nums; font-size: 20px; }
+.silo__valores small { display: block; color: var(--texto-3); font-family: var(--fonte); font-size: 11.5px; }
+
+/* --- regua de cobertura de cada produto --------------------------------- */
+
+.regua { display: flex; align-items: center; gap: 10px; white-space: nowrap; }
+.regua__trilho { position: relative; width: 150px; height: 12px; border-radius: 3px; overflow: hidden; display: flex; }
+.regua__zona { height: 100%; }
+.regua__nivel { position: absolute; left: 0; top: 3px; height: 6px; border-radius: 0 3px 3px 0; }
+.regua__dias { font-family: var(--fonte-mono); font-variant-numeric: tabular-nums; min-width: 52px; text-align: right; }
+
+.linha-clicavel { cursor: pointer; }
+.linha-clicavel:focus-visible { outline: 2px solid var(--acento); outline-offset: -2px; }
+.celula-produto { max-width: 360px; }
+.celula-produto__nome { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.celula-produto__meta { display: block; color: var(--texto-3); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+.filtro-ativo { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; color: var(--texto-2); }
+
+/* --- resumo do periodo (dashboard da demanda) --------------------------- */
+
+.barra-periodo { display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap; margin-bottom: 14px; }
+
+.resumo-periodo {
+  background: var(--superficie);
+  border: 1px solid var(--borda);
+  border-radius: var(--raio);
+  padding: 22px 24px;
+  margin-bottom: 16px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 260px;
+  gap: 24px 40px;
+}
+.resumo-periodo__frase {
+  margin: 0;
+  font-size: 22px;
+  line-height: 1.4;
+  font-weight: 400;
+  letter-spacing: -0.012em;
+  max-width: 60ch;
+  font-variant-numeric: tabular-nums;
+}
+.resumo-periodo__comparacao { margin: 10px 0 0; color: var(--texto-2); font-size: 13.5px; max-width: 70ch; }
+.resumo-periodo__fatos { margin: 0; display: grid; gap: 12px; border-left: 1px solid var(--borda); padding-left: 24px; }
+.resumo-periodo__fatos dt { color: var(--texto-2); font-size: 12.5px; }
+.resumo-periodo__fatos dd { margin: 1px 0 0; font-family: var(--fonte-mono); font-variant-numeric: tabular-nums; font-size: 18px; }
+
+.movimento { list-style: none; margin: 0; padding: 0; }
+.movimento li { display: grid; grid-template-columns: 1fr auto; gap: 2px 16px; padding: 10px 0; border-bottom: 1px solid var(--borda); }
+.movimento li:last-child { border-bottom: 0; }
+.movimento__nome { font-weight: 600; }
+.movimento__valor { font-family: var(--fonte-mono); font-variant-numeric: tabular-nums; font-size: 18px; text-align: right; }
+.movimento__explica { grid-column: 1 / -1; color: var(--texto-3); font-size: 12px; }
+.movimento--zero .movimento__nome, .movimento--zero .movimento__valor { color: var(--texto-3); font-weight: 400; }
+
+@media (max-width: 900px) {
+  .silo, .resumo-periodo { grid-template-columns: 1fr; }
+  .silo__valores, .resumo-periodo__fatos { border-left: 0; padding-left: 0; border-top: 1px solid var(--borda); padding-top: 14px; }
+  .resumo-periodo__frase { font-size: 19px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .silo__segmento { transition: none; }
+}

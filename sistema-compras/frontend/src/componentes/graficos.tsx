@@ -98,13 +98,14 @@ export function GraficoLinha({ series, rotulos, altura = 190, formatar }: {
   );
 }
 
-export function GraficoBarras({ dados, altura = 190, formatar, referencia }: {
+export function GraficoBarras({ dados, altura = 190, formatar, referencia, largura = 720 }: {
   dados: Array<{ rotulo: string; valor: number; cor?: string }>;
   altura?: number;
   formatar?: (v: number) => string;
   referencia?: number;
+  /** Largura de desenho: menor em cartao estreito, para o texto nao encolher. */
+  largura?: number;
 }) {
-  const largura = 720;
   const margem = { topo: 12, direita: 12, baixo: 28, esquerda: 52 };
   if (!dados.length) return <div className="vazio">Sem dados para o periodo</div>;
 

@@ -7,6 +7,7 @@ import { autenticar } from '../../middlewares/autenticar.js';
 import { exigirPermissao } from '../../middlewares/autorizar.js';
 import { query } from '../../config/database.js';
 import * as servico from './estoque.service.js';
+import * as cobertura from './cobertura.service.js';
 
 const listarSchema = paginacaoSchema.extend({
   situacao: z.enum(['RUPTURA', 'ABAIXO_SEGURANCA', 'ABAIXO_MINIMO', 'PONTO_PEDIDO', 'EXCESSO', 'NORMAL']).optional(),
@@ -62,6 +63,24 @@ estoqueRouter.get('/', exigirPermissao('estoque.ler'), rota(async (req, res) => 
     [...valores, filtro.limite, deslocamento(filtro)],
   );
   return ok(res, dados.rows, 'Posicao de estoque', metaPaginacao(total.rows[0]?.total ?? 0, filtro));
+}));
+
+const coberturaSchema = z.object({
+  busca: z.string().trim().max(120).optional(),
+  faixa: z.enum(cobertura.FAIXAS).optional(),
+  curva: z.enum(['A', 'B', 'C', 'SEM']).optional(),
+  ordenar: z.enum(['urgencia', 'cobertura', 'valor', 'venda', 'codigo']).default('urgencia'),
+  pagina: z.coerce.number().int().min(1).default(1),
+  limite: z.coerce.number().int().min(1).max(200).default(50),
+});
+
+/** Cobertura em dias pela venda real (90 dias), com faixas e resumo. */
+estoqueRouter.get('/cobertura', exigirPermissao('estoque.ler'), rota(async (req, res) => {
+  const filtro = validar(req, 'query', coberturaSchema);
+  const r = await cobertura.cobertura(filtro);
+  return ok(res, { linhas: r.linhas, resumo: r.resumo }, 'Cobertura do estoque', metaPaginacao(r.total, {
+    pagina: filtro.pagina, limite: filtro.limite, ordem: 'asc',
+  }));
 }));
 
 estoqueRouter.get('/criticos', exigirPermissao('estoque.ler'), rota(async (_req, res) => {

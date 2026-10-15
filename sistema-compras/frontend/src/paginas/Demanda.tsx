@@ -179,84 +179,135 @@ function PainelDashboard({ periodo, setPeriodo }: { periodo: Periodo; setPeriodo
       .finally(() => setCarregando(false));
   }, [periodo]);
 
-  if (carregando && !dash) return <Vazio>Carregando indicadores…</Vazio>;
+  if (carregando && !dash) return <Vazio>Carregando o periodo…</Vazio>;
   if (erro) return <Aviso>{erro}</Aviso>;
   if (!dash) return null;
 
-  // O mes corrente esta sempre incompleto e o primeiro mes da janela tambem
-  // pode estar: os dois apareceriam como uma queda que nao existe.
-  const mensal = (perfil?.por_mes ?? []).slice(0, -1).slice(-24);
+  // O mes corrente esta sempre incompleto, e meses antes da primeira venda
+  // importada nao sao "zero vendido": sao "sem dado". Os dois saem do grafico.
+  const meses = (perfil?.por_mes ?? []).slice(0, -1);
+  const primeiro = meses.findIndex((m) => Number(m.quantidade) > 0);
+  const mensal = primeiro < 0 ? [] : meses.slice(primeiro).slice(-24);
+  const semVendas = dash.quantidade_vendida === 0;
+
+  const variacao = dash.variacao_percentual;
+  const comparacao = variacao === null
+    ? 'Nao ha vendas no periodo anterior para comparar.'
+    : Math.abs(variacao) < 2
+      ? `Praticamente o mesmo volume dos ${dash.periodo.dias} dias anteriores (${variacao > 0 ? '+' : ''}${numero(variacao, 1)}%; antes foram ${numero(dash.quantidade_anterior)}).`
+      : `${numero(Math.abs(variacao), 1)}% ${variacao > 0 ? 'a mais' : 'a menos'} que nos ${dash.periodo.dias} dias anteriores, quando foram ${numero(dash.quantidade_anterior)}.`;
+
+  const porDia = perfil?.por_dia_semana ?? [];
+  const melhorDia = porDia.reduce((m, d) => (Number(d.media) > Number(m?.media ?? -1) ? d : m), porDia[0]);
+
+  const movimento = [
+    { nome: 'Em alta', valor: numero(dash.produtos_em_alta), zero: !dash.produtos_em_alta,
+      explica: 'venderam mais que no periodo anterior' },
+    { nome: 'Em queda', valor: numero(dash.produtos_em_queda), zero: !dash.produtos_em_queda,
+      explica: 'venderam menos que no periodo anterior' },
+    { nome: 'Em ruptura', valor: numero(dash.produtos_em_ruptura), zero: !dash.produtos_em_ruptura,
+      explica: 'vendem e estao sem saldo agora' },
+    { nome: 'Sazonais', valor: numero(dash.produtos_sazonais), zero: !dash.produtos_sazonais,
+      explica: 'com indice sazonal calculado (aba Sazonalidade)' },
+    { nome: 'Demanda reprimida', valor: numero(dash.demanda_reprimida_estimada), zero: !dash.demanda_reprimida_estimada,
+      explica: dash.demanda_reprimida_estimada
+        ? `estimativa do que deixou de vender sem estoque, ${moeda(dash.valor_reprimido_estimado)}`
+        : 'estimativa do que deixou de vender sem estoque (aba Ruptura e reprimida)' },
+  ];
 
   return (
     <>
-      <Cartao
-        titulo="Periodo"
-        acoes={<div className="filtros"><FiltroPeriodo periodo={periodo} aoMudar={setPeriodo} /></div>}
-      >
-        <p className="fraco">
-          {fmtData(dash.periodo.inicio)} a {fmtData(dash.periodo.fim)} ({dash.periodo.dias} dias).
-          Periodo anterior: {fmtData(dash.periodo_anterior.inicio)} a {fmtData(dash.periodo_anterior.fim)}.
-        </p>
-      </Cartao>
-
-      <div className="grade-indicadores">
-        <Indicador rotulo="Quantidade vendida" valor={numero(dash.quantidade_vendida)} nota="embalagens" />
-        <Indicador
-          rotulo="Faturamento"
-          valor={`R$ ${(dash.faturamento / 1_000_000).toLocaleString('pt-BR', { maximumFractionDigits: 2 })} mi`}
-          nota={moeda(dash.faturamento)}
-          tom="acento"
-        />
-        <Indicador rotulo="Demanda media diaria" valor={numero(dash.demanda_media_diaria, 1)} />
-        <Indicador rotulo="Demanda media mensal" valor={numero(dash.demanda_media_mensal)} />
-        <Indicador
-          rotulo="Variacao x periodo anterior"
-          valor={dash.variacao_percentual === null ? '—' : `${dash.variacao_percentual > 0 ? '+' : ''}${dash.variacao_percentual.toFixed(1)}%`}
-          tom={dash.variacao_percentual === null ? 'neutro' : dash.variacao_percentual >= 0 ? 'acento' : 'perigo'}
-          nota={`${numero(dash.quantidade_anterior)} antes`}
-        />
-        <Indicador rotulo="Produtos com venda" valor={numero(dash.produtos_com_venda)} />
-        <Indicador rotulo="Produtos em alta" valor={numero(dash.produtos_em_alta)} tom="acento" />
-        <Indicador rotulo="Produtos em queda" valor={numero(dash.produtos_em_queda)} tom="alerta" />
-        <Indicador rotulo="Produtos em ruptura" valor={numero(dash.produtos_em_ruptura)} tom="perigo" />
-        <Indicador rotulo="Produtos sazonais" valor={numero(dash.produtos_sazonais)} tom="info" />
-        <Indicador
-          rotulo="Demanda reprimida estimada"
-          valor={numero(dash.demanda_reprimida_estimada)}
-          nota={moeda(dash.valor_reprimido_estimado)}
-          tom="info"
-        />
+      <div className="barra-periodo">
+        <FiltroPeriodo periodo={periodo} aoMudar={setPeriodo} />
       </div>
 
-      {mensal.length > 0 && (
-        <Cartao titulo="Demanda por mes (ultimos 24 meses fechados)">
+      {semVendas ? (
+        <Vazio>
+          Nenhuma venda entre {fmtData(dash.periodo.inicio)} e {fmtData(dash.periodo.fim)}.
+          Escolha outro periodo ou importe o Rel 7104 em "Importar vendas".
+        </Vazio>
+      ) : (
+        <section className="resumo-periodo" aria-label="Resumo do periodo">
+          <div>
+            <p className="resumo-periodo__frase">
+              De {fmtData(dash.periodo.inicio)} a {fmtData(dash.periodo.fim)} foram
+              vendidas {numero(dash.quantidade_vendida)} embalagens, que somam
+              {' '}{milhoesExtenso(dash.faturamento)}.
+            </p>
+            <p className="resumo-periodo__comparacao">{comparacao}</p>
+          </div>
+          <dl className="resumo-periodo__fatos">
+            <div><dt>Produtos que venderam</dt><dd>{numero(dash.produtos_com_venda)}</dd></div>
+            <div><dt>Media por dia</dt><dd>{numero(dash.demanda_media_diaria, 0)}</dd></div>
+            <div><dt>Media por mes</dt><dd>{numero(dash.demanda_media_mensal)}</dd></div>
+          </dl>
+        </section>
+      )}
+
+      {mensal.length > 1 && (
+        <Cartao titulo="Embalagens vendidas por mes">
           <GraficoLinha
             rotulos={mensal.map((m) => `${MESES[m.mes - 1]}/${String(m.ano).slice(2)}`)}
-            series={[{ nome: 'Quantidade', valores: mensal.map((m) => Number(m.quantidade)) }]}
+            series={[{ nome: 'Embalagens', valores: mensal.map((m) => Number(m.quantidade)) }]}
           />
+          <p className="fraco" style={{ margin: '6px 0 0' }}>
+            Meses fechados, a partir da primeira venda importada. O mes atual entra quando terminar.
+          </p>
         </Cartao>
       )}
 
-      {(perfil?.por_ano?.length ?? 0) > 0 && (
+      <div className="colunas">
+        <Cartao titulo="O que se moveu no periodo">
+          <ul className="movimento">
+            {movimento.map((m) => (
+              <li key={m.nome} className={m.zero ? 'movimento--zero' : undefined}>
+                <span className="movimento__nome">{m.nome}</span>
+                <span className="movimento__valor">{m.valor}</span>
+                <span className="movimento__explica">{m.explica}</span>
+              </li>
+            ))}
+          </ul>
+        </Cartao>
+
+        {porDia.length > 0 && (
+          <Cartao titulo="Venda media por dia da semana">
+            <GraficoBarras
+              dados={porDia.map((d) => ({
+                rotulo: d.nome.slice(0, 3),
+                valor: Number(d.media),
+                cor: d === melhorDia ? '#3f6b2b' : '#c6cbbd',
+              }))}
+              formatar={(v) => numero(v)}
+              largura={420}
+              altura={220}
+            />
+            {melhorDia && (
+              <p className="fraco" style={{ margin: '6px 0 0' }}>
+                {melhorDia.nome} e o dia que mais vende, considerando os ultimos 365 dias.
+              </p>
+            )}
+          </Cartao>
+        )}
+      </div>
+
+      {(perfil?.por_ano?.length ?? 0) > 1 && (
         <Cartao titulo="Faturamento por ano">
           <GraficoBarras
             dados={perfil!.por_ano.map((a) => ({ rotulo: String(a.ano), valor: Number(a.valor) }))}
-            formatar={(v) => `${(v / 1_000_000).toFixed(1)}M`}
+            formatar={(v) => `${(v / 1_000_000).toFixed(1)} mi`}
           />
-          <p className="fraco">O ano corrente esta incompleto e por isso aparece menor.</p>
-        </Cartao>
-      )}
-
-      {(perfil?.por_dia_semana?.length ?? 0) > 0 && (
-        <Cartao titulo="Demanda por dia da semana (365 dias)">
-          <GraficoBarras
-            dados={perfil!.por_dia_semana.map((d) => ({ rotulo: d.nome.slice(0, 3), valor: Number(d.media) }))}
-            formatar={(v) => numero(v)}
-          />
+          <p className="fraco" style={{ margin: '6px 0 0' }}>O ano atual ainda esta em curso e aparece menor.</p>
         </Cartao>
       )}
     </>
   );
+}
+
+/** "R$ 41,6 milhoes" na frase; abaixo de um milhao, o valor inteiro. */
+function milhoesExtenso(v: number) {
+  return v >= 1_000_000
+    ? `R$ ${(v / 1_000_000).toLocaleString('pt-BR', { maximumFractionDigits: 1 })} milhoes`
+    : moeda(v);
 }
 
 /* --------------------------------------------------------------------- vendas */
@@ -315,7 +366,9 @@ function PainelVendas({ periodo, setPeriodo }: { periodo: Periodo; setPeriodo: (
                   <td>{v.cliente ?? '—'}</td>
                   <td>{v.estado ?? '—'}</td>
                   <td className="mono">{v.codigo}</td>
-                  <td>{v.descricao}</td>
+                  <td className="celula-produto" title={v.descricao}>
+                    <span className="celula-produto__nome">{v.descricao}</span>
+                  </td>
                   <td className="num">{numero(v.quantidade_liquida, 0)}</td>
                   <td>{v.unidade}</td>
                   <td className="num">{moeda(v.preco_unitario)}</td>
@@ -385,14 +438,19 @@ function PainelAnalise({ periodo, setPeriodo }: { periodo: Periodo; setPeriodo: 
                   <th>ABC</th><th>XYZ</th>
                   <th className="num">Qtd</th><th className="num">Valor</th>
                   <th className="num">Media/dia</th><th className="num">Media/mes</th>
-                  <th className="num">Dias c/ venda</th><th>Variacao</th><th />
+                  <th className="num">Dias c/ venda</th><th>Variacao</th>
                 </tr>
               </thead>
               <tbody>
                 {itens.map((l) => (
-                  <tr key={l.produto_id}>
+                  <tr key={l.produto_id} className="linha-clicavel" tabIndex={0}
+                    title="Abrir o historico do produto"
+                    onClick={() => setDetalhe(l.produto_id)}
+                    onKeyDown={(e) => { if (e.key === 'Enter') setDetalhe(l.produto_id); }}>
                     <td className="mono">{l.codigo}</td>
-                    <td>{l.descricao}</td>
+                    <td className="celula-produto" title={l.descricao}>
+                      <span className="celula-produto__nome">{l.descricao}</span>
+                    </td>
                     <td className="fraco">{l.categoria}</td>
                     <td>{l.classificacao_abc ? <Etiqueta texto={l.classificacao_abc} /> : '—'}</td>
                     <td>{l.classificacao_xyz ? <Etiqueta texto={l.classificacao_xyz} /> : '—'}</td>
@@ -402,11 +460,6 @@ function PainelAnalise({ periodo, setPeriodo }: { periodo: Periodo; setPeriodo: 
                     <td className="num">{numero(l.media_mensal, 1)}</td>
                     <td className="num">{numero(l.dias_com_venda)}</td>
                     <td><Variacao valor={l.variacao_percentual} /></td>
-                    <td>
-                      <button type="button" className="botao botao--pequeno botao--fantasma" onClick={() => setDetalhe(l.produto_id)}>
-                        Abrir
-                      </button>
-                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -853,6 +906,14 @@ function PainelAbcXyz({ podeCalcular }: { podeCalcular: boolean }) {
       >
         {aviso && <Aviso tipo="ok">{aviso}</Aviso>}
         {!dados && <Vazio>Carregando…</Vazio>}
+        {dados && !dados.matriz.some((m) => m.xyz !== 'SEM' && Number(m.produtos) > 0) && (
+          <Aviso>
+            Nenhum produto foi classificado ainda.
+            {podeCalcular
+              ? ' Use "Reclassificar" para calcular as curvas ABC e XYZ com as vendas dos ultimos 365 dias.'
+              : ' Peca a quem tem permissao de previsao para calcular as curvas.'}
+          </Aviso>
+        )}
         {dados && (
           <>
             <Matriz
