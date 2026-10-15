@@ -30,7 +30,59 @@ const PERIODOS = [
   { valor: '90', texto: '90 dias' },
   { valor: '180', texto: '180 dias' },
   { valor: '365', texto: '365 dias' },
+  { valor: 'PERSONALIZADO', texto: 'Personalizado (data inicio e fim)' },
 ];
+
+/**
+ * Periodo compartilhado por Dashboard, Historico e Analise: escolher o
+ * intervalo numa aba vale para as outras.
+ */
+interface Periodo { dias: string; inicio: string; fim: string }
+
+/** Parametros para a API: o intervalo de datas, ou os ultimos N dias. */
+const paramsPeriodo = (p: Periodo) => (p.dias === 'PERSONALIZADO'
+  ? { data_inicio: p.inicio, data_fim: p.fim }
+  : { dias: p.dias });
+
+/**
+ * O intervalo personalizado so e aplicado com as duas datas validas: aplicar a
+ * cada tecla dispararia consultas com o periodo pela metade.
+ */
+function FiltroPeriodo({ periodo, aoMudar }: { periodo: Periodo; aoMudar: (p: Periodo) => void }) {
+  const [modo, setModo] = useState(periodo.dias);
+  const [inicio, setInicio] = useState(periodo.inicio);
+  const [fim, setFim] = useState(periodo.fim);
+
+  const invalido = modo === 'PERSONALIZADO' && !!inicio && !!fim && fim < inicio;
+
+  const trocarModo = (v: string) => {
+    setModo(v);
+    if (v !== 'PERSONALIZADO') aoMudar({ dias: v, inicio: '', fim: '' });
+    else if (inicio && fim && fim >= inicio) aoMudar({ dias: v, inicio, fim });
+  };
+  const trocarData = (novoInicio: string, novoFim: string) => {
+    setInicio(novoInicio);
+    setFim(novoFim);
+    if (novoInicio && novoFim && novoFim >= novoInicio) {
+      aoMudar({ dias: 'PERSONALIZADO', inicio: novoInicio, fim: novoFim });
+    }
+  };
+
+  return (
+    <>
+      <Selecao rotulo="Periodo" valor={modo} aoMudar={trocarModo} opcoes={PERIODOS} vazio={null} />
+      {modo === 'PERSONALIZADO' && (
+        <>
+          <Entrada rotulo="Data inicio" tipo="date" valor={inicio}
+            aoMudar={(v) => trocarData(v, fim)} />
+          <Entrada rotulo="Data fim" tipo="date" valor={fim}
+            aoMudar={(v) => trocarData(inicio, v)}
+            erro={invalido ? 'Anterior a data inicio' : undefined} />
+        </>
+      )}
+    </>
+  );
+}
 
 const TOM_CONFIABILIDADE: Record<string, 'acento' | 'alerta' | 'perigo' | 'neutro'> = {
   ALTA: 'acento', MEDIA: 'alerta', BAIXA: 'perigo', INSUFICIENTE: 'neutro',
@@ -52,7 +104,7 @@ function Variacao({ valor }: { valor: number | null }) {
 export function Demanda() {
   const { pode } = useAuth();
   const [aba, setAba] = useState<Aba>('dashboard');
-  const [dias, setDias] = useState('90');
+  const [periodo, setPeriodo] = useState<Periodo>({ dias: '90', inicio: '', fim: '' });
   // Trocar a chave remonta a aba aberta: depois de importar, tudo recarrega.
   const [versao, setVersao] = useState(0);
   const podeImportar = pode('demanda.importar') || pode('integracao.importar');
@@ -79,9 +131,9 @@ export function Demanda() {
       </nav>
 
       <div key={versao}>
-        {aba === 'dashboard' && <PainelDashboard dias={dias} setDias={setDias} />}
-        {aba === 'vendas' && <PainelVendas />}
-        {aba === 'analise' && <PainelAnalise dias={dias} setDias={setDias} />}
+        {aba === 'dashboard' && <PainelDashboard periodo={periodo} setPeriodo={setPeriodo} />}
+        {aba === 'vendas' && <PainelVendas periodo={periodo} setPeriodo={setPeriodo} />}
+        {aba === 'analise' && <PainelAnalise periodo={periodo} setPeriodo={setPeriodo} />}
         {aba === 'previsao' && <PainelPrevisao podeCalcular={pode('demanda.prever')} />}
         {aba === 'sazonalidade' && <PainelSazonalidade podeCalcular={pode('demanda.prever')} />}
         {aba === 'abc' && <PainelAbcXyz podeCalcular={pode('demanda.prever')} />}
@@ -110,7 +162,7 @@ interface PerfilTemporal {
   por_ano: Array<{ ano: number; quantidade: number; valor: number }>;
 }
 
-function PainelDashboard({ dias, setDias }: { dias: string; setDias: (v: string) => void }) {
+function PainelDashboard({ periodo, setPeriodo }: { periodo: Periodo; setPeriodo: (p: Periodo) => void }) {
   const [dash, setDash] = useState<Dash | null>(null);
   const [perfil, setPerfil] = useState<PerfilTemporal | null>(null);
   const [erro, setErro] = useState<string | null>(null);
@@ -119,13 +171,13 @@ function PainelDashboard({ dias, setDias }: { dias: string; setDias: (v: string)
   useEffect(() => {
     setCarregando(true);
     Promise.all([
-      api<Dash>('/demanda/dashboard', { query: { dias } }),
+      api<Dash>('/demanda/dashboard', { query: paramsPeriodo(periodo) }),
       api<PerfilTemporal>('/demanda/perfil-temporal', { query: { dias: 1100 } }),
     ])
       .then(([d, p]) => { setDash(d.data); setPerfil(p.data); setErro(null); })
       .catch((e) => setErro(e instanceof ErroApi ? e.message : 'Falha ao carregar o dashboard'))
       .finally(() => setCarregando(false));
-  }, [dias]);
+  }, [periodo]);
 
   if (carregando && !dash) return <Vazio>Carregando indicadores…</Vazio>;
   if (erro) return <Aviso>{erro}</Aviso>;
@@ -139,7 +191,7 @@ function PainelDashboard({ dias, setDias }: { dias: string; setDias: (v: string)
     <>
       <Cartao
         titulo="Periodo"
-        acoes={<Selecao rotulo="" valor={dias} aoMudar={setDias} opcoes={PERIODOS} vazio={null} />}
+        acoes={<div className="filtros"><FiltroPeriodo periodo={periodo} aoMudar={setPeriodo} /></div>}
       >
         <p className="fraco">
           {fmtData(dash.periodo.inicio)} a {fmtData(dash.periodo.fim)} ({dash.periodo.dias} dias).
@@ -216,14 +268,13 @@ interface LinhaVenda {
   quantidade: number; preco_unitario: number; valor_total: number; quantidade_liquida: number;
 }
 
-function PainelVendas() {
+function PainelVendas({ periodo, setPeriodo }: { periodo: Periodo; setPeriodo: (p: Periodo) => void }) {
   const [busca, setBusca] = useState('');
   const [tipo, setTipo] = useState('');
-  const [dias, setDias] = useState('90');
   const [pagina, setPagina] = useState(1);
 
   const { itens, meta, carregando, erro } = useLista<LinhaVenda>('/demanda/vendas', {
-    pagina, limite: 25, busca, tipo_documento: tipo, dias,
+    pagina, limite: 25, busca, tipo_documento: tipo, ...paramsPeriodo(periodo),
   });
 
   return (
@@ -236,7 +287,7 @@ function PainelVendas() {
             rotulo="Tipo" valor={tipo} aoMudar={(v) => { setTipo(v); setPagina(1); }}
             opcoes={[{ valor: 'VENDA', texto: 'Venda' }, { valor: 'DEVOLUCAO', texto: 'Devolucao' }]}
           />
-          <Selecao rotulo="Periodo" valor={dias} aoMudar={(v) => { setDias(v); setPagina(1); }} opcoes={PERIODOS} vazio={null} />
+          <FiltroPeriodo periodo={periodo} aoMudar={(p) => { setPeriodo(p); setPagina(1); }} />
         </div>
       )}
       semCorpo
@@ -292,14 +343,14 @@ interface LinhaAnalise {
   quantidade_anterior: number; variacao_percentual: number | null;
 }
 
-function PainelAnalise({ dias, setDias }: { dias: string; setDias: (v: string) => void }) {
+function PainelAnalise({ periodo, setPeriodo }: { periodo: Periodo; setPeriodo: (p: Periodo) => void }) {
   const [busca, setBusca] = useState('');
   const [pagina, setPagina] = useState(1);
   const [ordenar, setOrdenar] = useState('quantidade');
   const [detalhe, setDetalhe] = useState<number | null>(null);
 
   const { itens, meta, carregando, erro } = useLista<LinhaAnalise>('/demanda', {
-    pagina, limite: 25, busca, dias, ordenar_por: ordenar, ordem: 'desc',
+    pagina, limite: 25, busca, ...paramsPeriodo(periodo), ordenar_por: ordenar, ordem: 'desc',
   });
 
   return (
@@ -309,7 +360,7 @@ function PainelAnalise({ dias, setDias }: { dias: string; setDias: (v: string) =
         acoes={(
           <div className="filtros">
             <Entrada rotulo="Buscar" valor={busca} aoMudar={(v) => { setBusca(v); setPagina(1); }} placeholder="codigo ou descricao" />
-            <Selecao rotulo="Periodo" valor={dias} aoMudar={(v) => { setDias(v); setPagina(1); }} opcoes={PERIODOS} vazio={null} />
+            <FiltroPeriodo periodo={periodo} aoMudar={(p) => { setPeriodo(p); setPagina(1); }} />
             <Selecao
               rotulo="Ordenar por" valor={ordenar} aoMudar={setOrdenar} vazio={null}
               opcoes={[
