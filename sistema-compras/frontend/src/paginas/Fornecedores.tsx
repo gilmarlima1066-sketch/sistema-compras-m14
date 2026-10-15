@@ -4,8 +4,9 @@ import type { Fornecedor } from '../api/tipos';
 import { useAuth } from '../auth/AuthContext';
 import { useLista } from '../hooks/useLista';
 import { CabecalhoPagina } from '../componentes/Cabecalho';
+import { CONFIG_FORNECEDORES, ImportarPlanilha } from '../componentes/ImportarPlanilha';
 import {
-  Aviso, Cartao, Entrada, Etiqueta, EtiquetaAtivo, Modal, Paginacao, Selecao, Vazio, numero,
+  Aviso, Cartao, Entrada, Etiqueta, Modal, Paginacao, Selecao, Vazio, data, moeda, numero,
 } from '../componentes/ui';
 
 const TIPOS = ['FABRICANTE', 'DISTRIBUIDOR', 'PRODUTOR', 'IMPORTADOR', 'REPRESENTANTE', 'OUTRO'];
@@ -16,21 +17,65 @@ const FORM_VAZIO = {
   origem_fornecedor: 'NACIONAL', prazo_medio_pagamento: '', lead_time_padrao_dias: '',
 };
 
-/** Formata o CNPJ apenas para leitura; o backend guarda so digitos. */
-const formatarCnpj = (cnpj: string | null) =>
-  cnpj && cnpj.length === 14
-    ? cnpj.replace(/^(\d{2})(\d{3})(\d{3})(\d{4})(\d{2})$/, '$1.$2.$3/$4-$5')
-    : (cnpj ?? '—');
+/** Formata CNPJ ou CPF apenas para leitura; o backend guarda so digitos. */
+const formatarCnpj = (doc: string | null) => {
+  if (doc?.length === 14) return doc.replace(/^(\d{2})(\d{3})(\d{3})(\d{4})(\d{2})$/, '$1.$2.$3/$4-$5');
+  if (doc?.length === 11) return doc.replace(/^(\d{3})(\d{3})(\d{3})(\d{2})$/, '$1.$2.$3-$4');
+  return doc ?? '—';
+};
+
+/** Chave liga/desliga: verde e "Ativo" quando ligado; o texto acompanha a cor. */
+function ChaveAtivo({ ativo, nome, ocupado, desabilitado, aoTrocar }: {
+  ativo: boolean; nome: string; ocupado: boolean; desabilitado: boolean; aoTrocar: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={ativo}
+      aria-label={`${nome}: ${ativo ? 'ativo, clique para inativar' : 'inativo, clique para ativar'}`}
+      className={`chave${ativo ? ' chave--ligada' : ''}${ocupado ? ' chave--ocupada' : ''}`}
+      disabled={desabilitado || ocupado}
+      onClick={aoTrocar}
+    >
+      <span className="chave__trilho" aria-hidden><span className="chave__botao" /></span>
+      <span className="chave__texto">{ativo ? 'Ativo' : 'Inativo'}</span>
+    </button>
+  );
+}
 
 export function Fornecedores() {
   const { pode } = useAuth();
   const [busca, setBusca] = useState('');
   const [origem, setOrigem] = useState('');
   const [tipo, setTipo] = useState('');
+  const [situacao, setSituacao] = useState('');
   const [pagina, setPagina] = useState(1);
 
   const { itens, meta, carregando, erro, recarregar } =
-    useLista<Fornecedor>('/fornecedores', { pagina, limite: 25, busca, origem, tipo, ativo: 'true' });
+    useLista<Fornecedor>('/fornecedores', { pagina, limite: 25, busca, origem, tipo, ativo: situacao });
+
+  // A chave responde na hora; se o servidor recusar, volta e explica.
+  const [trocados, setTrocados] = useState<Record<number, boolean>>({});
+  const [ocupados, setOcupados] = useState<Set<number>>(new Set());
+  const [erroChave, setErroChave] = useState<string | null>(null);
+  const podeEditar = pode('fornecedores.editar');
+
+  async function alternar(f: Fornecedor) {
+    const novo = !(trocados[f.id] ?? f.ativo);
+    setErroChave(null);
+    setTrocados((t) => ({ ...t, [f.id]: novo }));
+    setOcupados((o) => new Set(o).add(f.id));
+    try {
+      await api(`/fornecedores/${f.id}/ativo`, { metodo: 'PATCH', corpo: { ativo: novo } });
+    } catch (e) {
+      setTrocados((t) => ({ ...t, [f.id]: !novo }));
+      setErroChave(`Nao foi possivel ${novo ? 'ativar' : 'inativar'} ${f.nome_fantasia ?? f.razao_social}: `
+        + (e instanceof ErroApi ? e.message : 'falha de conexao'));
+    } finally {
+      setOcupados((o) => { const n = new Set(o); n.delete(f.id); return n; });
+    }
+  }
 
   const [aberto, setAberto] = useState(false);
   const [form, setForm] = useState({ ...FORM_VAZIO });
@@ -76,15 +121,20 @@ export function Fornecedores() {
         titulo="Fornecedores"
         descricao="Base de fornecedores nacionais e internacionais, com prazos e lead time padrao."
         acoes={pode('fornecedores.criar') && (
-          <button type="button" className="botao botao--primario" onClick={() => setAberto(true)}>
-            Novo fornecedor
-          </button>
+          <>
+            <ImportarPlanilha config={CONFIG_FORNECEDORES} aoConcluir={() => { setTrocados({}); void recarregar(); }} />
+            <button type="button" className="botao" onClick={() => setAberto(true)}>
+              Novo fornecedor
+            </button>
+          </>
         )}
       />
 
       <div className="filtros">
         <Entrada rotulo="Buscar" valor={busca} aoMudar={(v) => { setBusca(v); setPagina(1); }}
-          placeholder="razao social, fantasia ou CNPJ" className="campo--busca" />
+          placeholder="nome, CNPJ ou ID do ERP" className="campo--busca" />
+        <Selecao rotulo="Situacao" valor={situacao} aoMudar={(v) => { setSituacao(v); setPagina(1); setTrocados({}); }} vazio="Todos"
+          opcoes={[{ valor: 'true', texto: 'Ativos' }, { valor: 'false', texto: 'Inativos' }]} />
         <Selecao rotulo="Origem" valor={origem} aoMudar={(v) => { setOrigem(v); setPagina(1); }} vazio="Todas"
           opcoes={[{ valor: 'NACIONAL', texto: 'Nacional' }, { valor: 'INTERNACIONAL', texto: 'Internacional' }]} />
         <Selecao rotulo="Tipo" valor={tipo} aoMudar={(v) => { setTipo(v); setPagina(1); }} vazio="Todos"
@@ -92,42 +142,65 @@ export function Fornecedores() {
       </div>
 
       {erro && <Aviso>{erro}</Aviso>}
+      {erroChave && <Aviso>{erroChave}</Aviso>}
 
       <Cartao semCorpo>
         <div className="tabela-wrap">
           <table className="tabela">
             <thead>
               <tr>
+                <th>Situacao</th>
+                <th>ID ERP</th>
                 <th>Fornecedor</th>
-                <th>CNPJ</th>
-                <th>Tipo</th>
-                <th>Origem</th>
+                <th>CNPJ / CPF</th>
+                <th>Contato</th>
                 <th>Local</th>
-                <th className="dir">Prazo (d)</th>
+                <th>Ultimo pedido</th>
                 <th className="dir">Lead time (d)</th>
                 <th className="dir">Produtos</th>
-                <th>Situacao</th>
               </tr>
             </thead>
             <tbody>
-              {itens.map((f) => (
-                <tr key={f.id}>
-                  <td>
-                    <div>{f.nome_fantasia ?? f.razao_social}</div>
-                    {f.nome_fantasia && <div style={{ fontSize: 11, color: 'var(--texto-3)' }}>{f.razao_social}</div>}
-                  </td>
-                  <td className="num">{formatarCnpj(f.cnpj)}</td>
-                  <td>{f.tipo_fornecedor}</td>
-                  <td>
-                    <Etiqueta texto={f.origem_fornecedor} tom={f.origem_fornecedor === 'INTERNACIONAL' ? 'info' : 'neutro'} />
-                  </td>
-                  <td>{[f.cidade, f.estado].filter(Boolean).join('/') || f.pais}</td>
-                  <td className="dir num">{f.prazo_medio_pagamento ?? '—'}</td>
-                  <td className="dir num">{f.lead_time_padrao_dias ?? '—'}</td>
-                  <td className="dir num">{numero(f.total_produtos)}</td>
-                  <td><EtiquetaAtivo ativo={f.ativo} /></td>
-                </tr>
-              ))}
+              {itens.map((f) => {
+                const ativo = trocados[f.id] ?? f.ativo;
+                return (
+                  <tr key={f.id} className={ativo ? undefined : 'linha-inativa'}>
+                    <td>
+                      <ChaveAtivo
+                        ativo={ativo} nome={f.nome_fantasia ?? f.razao_social}
+                        ocupado={ocupados.has(f.id)} desabilitado={!podeEditar}
+                        aoTrocar={() => void alternar(f)}
+                      />
+                    </td>
+                    <td className="num">{f.codigo_erp ?? '—'}</td>
+                    <td className="celula-produto">
+                      <span className="celula-produto__nome">{f.nome_fantasia ?? f.razao_social}</span>
+                      {f.nome_fantasia && f.nome_fantasia !== f.razao_social && (
+                        <span className="celula-produto__meta">{f.razao_social}</span>
+                      )}
+                      {f.origem_fornecedor === 'INTERNACIONAL' && <Etiqueta texto="INTERNACIONAL" tom="info" />}
+                    </td>
+                    <td className="num" style={{ whiteSpace: 'nowrap' }}>{formatarCnpj(f.cnpj)}</td>
+                    <td>
+                      <div>{f.contato ?? '—'}</div>
+                      {(f.telefone || f.email) && (
+                        <div className="celula-produto__meta">{[f.telefone, f.email].filter(Boolean).join(', ')}</div>
+                      )}
+                    </td>
+                    <td>{[f.cidade, f.estado].filter(Boolean).join('/') || f.pais}</td>
+                    <td>
+                      {f.data_ultimo_pedido ? (
+                        <>
+                          <div>{data(f.data_ultimo_pedido)}</div>
+                          {f.valor_ultimo_pedido ? <div className="celula-produto__meta">{moeda(f.valor_ultimo_pedido)}</div> : null}
+                        </>
+                      ) : <span className="fraco">nunca</span>}
+                    </td>
+                    <td className="dir num">{f.lead_time_padrao_dias ?? '—'}</td>
+                    <td className="dir num">{numero(f.total_produtos)}</td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
           {carregando && <div className="carregando">Carregando fornecedores…</div>}

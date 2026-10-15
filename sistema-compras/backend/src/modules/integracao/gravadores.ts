@@ -23,6 +23,7 @@
 import type { PoolClient } from 'pg';
 import { pool, type ContextoSessao } from '../../config/database.js';
 import { registrarGravador, type EstadoImportacao } from './importacao.service.js';
+import { cnpj, cpf } from './normalizacao.js';
 
 type Linha = { linha: number; dados: Record<string, unknown> };
 
@@ -395,8 +396,12 @@ const gravarProdutos = async (
 // ===========================================================================
 
 const gravarFornecedores = async (
-  lote: Linha[], contexto: ContextoSessao, _estado: EstadoImportacao,
+  lote: Linha[], contexto: ContextoSessao, estado: EstadoImportacao,
 ): Promise<Saida> => {
+  // A base do ERP traz o ID do fornecedor; o layout padrao so tem o CNPJ.
+  if (lote.some((l) => txt(l.dados['fornecedor.codigo_erp']))) {
+    return gravarFornecedoresErp(lote, contexto, estado);
+  }
   const saida: Saida = {
     criados: 0, atualizados: 0, descartados: 0, rejeitados: 0, motivos: new Map(),
   };
@@ -464,6 +469,205 @@ const gravarFornecedores = async (
 
   return saida;
 };
+
+/**
+ * CNPJ ou CPF a partir do que o Excel deixou. A coluna CNPJCPF costuma virar
+ * numero e perder o zero a esquerda (03741925000181 chega como 3741925000181):
+ * o digito verificador decide se o documento e CPF ou CNPJ e quantos zeros
+ * repor. Com 11 digitos ou menos, CPF vem primeiro - CNPJ que perdeu tres
+ * zeros e raro.
+ */
+function documentoFornecedor(valor: unknown): string | null {
+  const digitos = String(valor ?? '').replace(/\D/g, '');
+  if (!digitos || digitos.length > 14) return null;
+  const tentativas = digitos.length <= 11
+    ? [() => cpf(digitos.padStart(11, '0')), () => cnpj(digitos.padStart(14, '0'))]
+    : [() => cnpj(digitos.padStart(14, '0'))];
+  for (const tentar of tentativas) {
+    const r = tentar();
+    if (r.ok && r.valor) return r.valor;
+  }
+  return null;
+}
+
+const EMAIL_VALIDO = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+
+/** Primeiro e-mail valido da celula ("a@x.com; b@y.com" acontece). */
+const primeiroEmail = (valor: unknown): string | null =>
+  String(valor ?? '').split(/[;,\s]+/).map((e) => e.trim().toLowerCase())
+    .find((e) => EMAIL_VALIDO.test(e)) ?? null;
+
+/** CEP numerico perde o zero de Sao Paulo (02401-000 vira 2401000). */
+const cepDe = (valor: unknown): string | null => {
+  const d = String(valor ?? '').replace(/\D/g, '');
+  return d && d.length <= 8 ? d.padStart(8, '0') : null;
+};
+
+interface FornecedorErp {
+  codigo_erp: string; razao_social: string; nome_fantasia: string | null; ativo: boolean;
+  cnpj: string | null; inscricao_estadual: string | null; contato: string | null;
+  telefone: string | null; email: string | null; endereco: string | null; numero: string | null;
+  bairro: string | null; cidade: string | null; estado: string | null; cep: string | null;
+  data_ultimo_pedido: string | null; valor_ultimo_pedido: number | null;
+}
+
+/**
+ * Base de fornecedores do ERP. O ID do ERP e a chave: reimportar o arquivo
+ * atualiza em vez de duplicar. Fornecedor cadastrado a mao com o mesmo CNPJ
+ * e adotado (recebe o codigo do ERP) em vez de virar um segundo cadastro.
+ *
+ * A situacao (ATIVO) do arquivo vale: o ERP e a origem do cadastro. Quem
+ * inativar um fornecedor no sistema e depois reimportar o arquivo com ele
+ * ativo o vera ativo de novo.
+ */
+async function gravarFornecedoresErp(
+  lote: Linha[], contexto: ContextoSessao, _estado: EstadoImportacao,
+): Promise<Saida> {
+  const saida: Saida = {
+    criados: 0, atualizados: 0, descartados: 0, rejeitados: 0, motivos: new Map(),
+  };
+
+  const porCodigo = new Map<string, FornecedorErp>();
+  for (const { dados } of lote) {
+    const codigo = txt(dados['fornecedor.codigo_erp'])?.replace(/\.0+$/, '');
+    const razao = txt(dados['fornecedor.nome']) ?? txt(dados['fornecedor.nome_fantasia']);
+    if (!codigo) {
+      saida.rejeitados += 1;
+      conta(saida.motivos, 'linha sem ID do fornecedor');
+      continue;
+    }
+    if (!razao) {
+      saida.rejeitados += 1;
+      conta(saida.motivos, 'fornecedor sem NOME nem FANTASIA');
+      continue;
+    }
+    const docBruto = txt(dados['fornecedor.documento']);
+    const documento = documentoFornecedor(docBruto);
+    if (docBruto && !documento) conta(saida.motivos, 'CNPJ/CPF invalido: importado sem documento');
+    const emailBruto = txt(dados['fornecedor.email']);
+    const email = primeiroEmail(emailBruto);
+    if (emailBruto && !email) conta(saida.motivos, 'e-mail invalido: importado sem e-mail');
+    const uf = txt(dados['fornecedor.estado'])?.toUpperCase() ?? null;
+    const valor = dados['fornecedor.valor_ultimo_pedido'];
+    const ativo = dados['fornecedor.ativo'];
+
+    if (porCodigo.has(codigo)) conta(saida.motivos, 'ID repetido no arquivo: vale a ultima linha');
+    porCodigo.set(codigo, {
+      codigo_erp: codigo,
+      razao_social: razao,
+      nome_fantasia: txt(dados['fornecedor.nome_fantasia']),
+      ativo: typeof ativo === 'boolean' ? ativo : true,
+      cnpj: documento,
+      inscricao_estadual: txt(dados['fornecedor.inscricao_estadual']),
+      contato: txt(dados['fornecedor.contato']),
+      telefone: txt(dados['fornecedor.telefone']),
+      email,
+      endereco: txt(dados['fornecedor.endereco']),
+      numero: txt(dados['fornecedor.numero'])?.replace(/\.0+$/, '') ?? null,
+      bairro: txt(dados['fornecedor.bairro']),
+      cidade: txt(dados['fornecedor.cidade']),
+      estado: uf && uf.length >= 2 && uf.length <= 40 ? uf : null,
+      cep: cepDe(dados['fornecedor.cep']),
+      data_ultimo_pedido: txt(dados['fornecedor.data_ultimo_pedido']),
+      valor_ultimo_pedido: typeof valor === 'number' && valor > 0 ? valor : null,
+    });
+  }
+  if (!porCodigo.size) return saida;
+
+  // Dois IDs com o mesmo CNPJ no arquivo: o indice unico do CNPJ recusaria o
+  // lote inteiro. O primeiro fica com o documento; os demais entram sem ele.
+  const docsNoLote = new Map<string, string>();
+  for (const f of porCodigo.values()) {
+    if (!f.cnpj) continue;
+    if (docsNoLote.has(f.cnpj)) {
+      conta(saida.motivos, `CNPJ/CPF repetido no arquivo (ID ${docsNoLote.get(f.cnpj)}): importado sem documento`);
+      f.cnpj = null;
+    } else {
+      docsNoLote.set(f.cnpj, f.codigo_erp);
+    }
+  }
+
+  const cliente = await pool.connect();
+  try {
+    await cliente.query('BEGIN');
+    if (contexto.usuarioId) {
+      await cliente.query('SELECT set_config($1, $2, true)',
+        ['app.usuario_id', String(contexto.usuarioId)]);
+    }
+
+    // Adota o cadastro manual com o mesmo CNPJ e ainda sem codigo do ERP.
+    const fornecedores = [...porCodigo.values()];
+    const comDoc = fornecedores.filter((f) => f.cnpj);
+    await cliente.query(`
+      UPDATE fornecedores f SET codigo_erp = x.codigo, updated_at = now()
+        FROM unnest($1::text[], $2::text[]) AS x(codigo, doc)
+       WHERE f.cnpj = x.doc AND f.codigo_erp IS NULL AND f.deleted_at IS NULL
+         AND NOT EXISTS (SELECT 1 FROM fornecedores o
+                          WHERE o.codigo_erp = x.codigo AND o.deleted_at IS NULL)`,
+    [comDoc.map((f) => f.codigo_erp), comDoc.map((f) => f.cnpj)]);
+
+    // CNPJ que ja pertence a outro fornecedor (outro ID do ERP): entra sem ele.
+    const { rows: donos } = await cliente.query<{ cnpj: string; codigo_erp: string | null; nome: string }>(`
+      SELECT cnpj, codigo_erp, coalesce(nome_fantasia, razao_social) AS nome
+        FROM fornecedores WHERE cnpj = ANY($1::text[]) AND deleted_at IS NULL`,
+    [comDoc.map((f) => f.cnpj)]);
+    const donoDe = new Map(donos.map((d) => [d.cnpj, d]));
+    for (const f of comDoc) {
+      const dono = donoDe.get(f.cnpj!);
+      if (dono && dono.codigo_erp !== f.codigo_erp) {
+        conta(saida.motivos, 'CNPJ/CPF ja usado por outro fornecedor: importado sem documento');
+        f.cnpj = null;
+      }
+    }
+
+    const { rows } = await cliente.query<{ inserido: boolean }>(`
+      INSERT INTO fornecedores
+        (codigo_erp, razao_social, nome_fantasia, ativo, cnpj, inscricao_estadual, contato,
+         telefone, email, endereco, numero, bairro, cidade, estado, cep,
+         data_ultimo_pedido, valor_ultimo_pedido, origem_fornecedor, created_by, updated_by)
+      SELECT x.codigo_erp, x.razao_social, coalesce(x.nome_fantasia, x.razao_social), x.ativo,
+             x.cnpj, x.inscricao_estadual, x.contato, x.telefone, x.email, x.endereco, x.numero,
+             x.bairro, x.cidade, x.estado, x.cep, x.data_ultimo_pedido, x.valor_ultimo_pedido,
+             'NACIONAL', $2, $2
+        FROM jsonb_to_recordset($1::jsonb) AS x(
+          codigo_erp text, razao_social text, nome_fantasia text, ativo boolean, cnpj text,
+          inscricao_estadual text, contato text, telefone text, email text, endereco text,
+          numero text, bairro text, cidade text, estado text, cep text,
+          data_ultimo_pedido date, valor_ultimo_pedido numeric)
+      ON CONFLICT (codigo_erp) WHERE codigo_erp IS NOT NULL AND deleted_at IS NULL DO UPDATE
+        SET razao_social = EXCLUDED.razao_social,
+            nome_fantasia = EXCLUDED.nome_fantasia,
+            ativo = EXCLUDED.ativo,
+            cnpj = coalesce(EXCLUDED.cnpj, fornecedores.cnpj),
+            inscricao_estadual = coalesce(EXCLUDED.inscricao_estadual, fornecedores.inscricao_estadual),
+            contato = coalesce(EXCLUDED.contato, fornecedores.contato),
+            telefone = coalesce(EXCLUDED.telefone, fornecedores.telefone),
+            email = coalesce(EXCLUDED.email, fornecedores.email),
+            endereco = coalesce(EXCLUDED.endereco, fornecedores.endereco),
+            numero = coalesce(EXCLUDED.numero, fornecedores.numero),
+            bairro = coalesce(EXCLUDED.bairro, fornecedores.bairro),
+            cidade = coalesce(EXCLUDED.cidade, fornecedores.cidade),
+            estado = coalesce(EXCLUDED.estado, fornecedores.estado),
+            cep = coalesce(EXCLUDED.cep, fornecedores.cep),
+            data_ultimo_pedido = coalesce(EXCLUDED.data_ultimo_pedido, fornecedores.data_ultimo_pedido),
+            valor_ultimo_pedido = coalesce(EXCLUDED.valor_ultimo_pedido, fornecedores.valor_ultimo_pedido),
+            updated_by = EXCLUDED.updated_by,
+            updated_at = now()
+      RETURNING (xmax = 0) AS inserido`,
+    [JSON.stringify(fornecedores), contexto.usuarioId ?? null]);
+
+    for (const r of rows) {
+      if (r.inserido) saida.criados += 1; else saida.atualizados += 1;
+    }
+    await cliente.query('COMMIT');
+  } catch (erro) {
+    await cliente.query('ROLLBACK');
+    throw erro;
+  } finally {
+    cliente.release();
+  }
+  return saida;
+}
 
 // ===========================================================================
 // PRODUTO x FORNECEDOR — a tabela de precos que o fornecedor manda

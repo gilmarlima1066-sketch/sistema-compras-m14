@@ -1053,3 +1053,27 @@ button.ranking__linha:focus-visible, button.divergente__linha:focus-visible { ou
 @media (prefers-reduced-motion: reduce) {
   .silo__segmento { transition: none; }
 }
+
+/* --- chave ativo/inativo (fornecedores) ----------------------------------- */
+
+.chave {
+  display: inline-flex; align-items: center; gap: 8px; padding: 2px 4px; margin: -2px -4px;
+  background: none; border: 0; border-radius: 6px; cursor: pointer; font-size: 12.5px; color: var(--texto-3);
+}
+.chave:focus-visible { outline: 2px solid var(--acento); outline-offset: 1px; }
+.chave:disabled { cursor: default; }
+.chave__trilho {
+  position: relative; width: 34px; height: 20px; flex: none; border-radius: 10px;
+  background: var(--borda-forte); transition: background .18s;
+}
+.chave__botao {
+  position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%;
+  background: #fff; box-shadow: 0 1px 2px rgba(17, 21, 15, .3); transition: transform .18s;
+}
+.chave--ligada { color: var(--acento); font-weight: 600; }
+.chave--ligada .chave__trilho { background: var(--acento); }
+.chave--ligada .chave__botao { transform: translateX(14px); }
+.chave--ocupada .chave__trilho { opacity: .6; }
+.chave:disabled:not(.chave--ocupada) .chave__trilho { opacity: .55; }
+.linha-inativa td:not(:first-child) { color: var(--texto-3); }
+@media (prefers-reduced-motion: reduce) { .chave__trilho, .chave__botao { transition: none; } }

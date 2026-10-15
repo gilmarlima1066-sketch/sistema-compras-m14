@@ -3,7 +3,7 @@ import { naoEncontrado, regraNegocio } from '../../core/errors.js';
 import { deslocamento, metaPaginacao, ordenacaoSegura } from '../../core/paginacao.js';
 import type { FiltroFornecedores, NovoFornecedor, VinculoProduto } from './fornecedores.schemas.js';
 
-const COLUNAS_ORDENAVEIS = ['razao_social', 'nome_fantasia', 'cidade', 'created_at'];
+const COLUNAS_ORDENAVEIS = ['razao_social', 'nome_fantasia', 'cidade', 'created_at', 'data_ultimo_pedido'];
 
 const CAMPOS_GRAVAVEIS = [
   'razao_social', 'nome_fantasia', 'cnpj', 'inscricao_estadual', 'email', 'telefone', 'celular',
@@ -17,9 +17,11 @@ export async function listar(filtro: FiltroFornecedores) {
   const valores: unknown[] = [];
 
   if (filtro.busca) {
-    valores.push(`%${filtro.busca}%`);
+    valores.push(`%${filtro.busca}%`, filtro.busca.trim());
+    const like = valores.length - 1;
     condicoes.push(
-      `(razao_social ILIKE $${valores.length} OR nome_fantasia ILIKE $${valores.length} OR cnpj ILIKE $${valores.length})`,
+      `(razao_social ILIKE $${like} OR nome_fantasia ILIKE $${like}
+        OR cnpj ILIKE $${like} OR codigo_erp = $${like + 1})`,
     );
   }
   if (filtro.origem) {
@@ -95,6 +97,20 @@ export async function atualizar(id: number, dados: Partial<NovoFornecedor>, cont
       `UPDATE fornecedores SET ${campos.map((c, i) => `${c} = $${i + 2}`).join(', ')}
         WHERE id = $1 AND deleted_at IS NULL RETURNING *`,
       [id, ...campos.map((c) => (dados as Record<string, unknown>)[c])],
+    );
+    if (!rows[0]) throw naoEncontrado('Fornecedor');
+    return rows[0];
+  });
+}
+
+/** Liga ou desliga o fornecedor para cotacao e compra; o historico fica. */
+export async function definirAtivo(id: number, ativo: boolean, contexto: ContextoSessao) {
+  return comTransacao(contexto, async (cliente) => {
+    const { rows } = await cliente.query(
+      `UPDATE fornecedores SET ativo = $2, updated_at = now()
+        WHERE id = $1 AND deleted_at IS NULL
+        RETURNING id, ativo, coalesce(nome_fantasia, razao_social) AS nome`,
+      [id, ativo],
     );
     if (!rows[0]) throw naoEncontrado('Fornecedor');
     return rows[0];

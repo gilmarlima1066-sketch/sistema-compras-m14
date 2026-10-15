@@ -6,7 +6,7 @@ import { exigirPermissao } from '../../middlewares/autorizar.js';
 import * as servico from './fornecedores.service.js';
 import {
   atualizarFornecedorSchema, criarFornecedorSchema, idSchema,
-  listarFornecedoresSchema, vinculoProdutoSchema,
+  listarFornecedoresSchema, situacaoSchema, vinculoProdutoSchema,
 } from './fornecedores.schemas.js';
 
 export const fornecedoresRouter = Router();
@@ -39,6 +39,14 @@ fornecedoresRouter.put('/:id', exigirPermissao('fornecedores.editar'), rota(asyn
   const dados = validar(req, 'body', atualizarFornecedorSchema);
   const fornecedor = await servico.atualizar(id, dados, { usuarioId: req.usuario!.id, ip: req.ipCliente });
   return ok(res, fornecedor, 'Fornecedor atualizado com sucesso');
+}));
+
+// Ativar/inativar sem passar pelo formulario inteiro: o botao da lista.
+fornecedoresRouter.patch('/:id/ativo', exigirPermissao('fornecedores.editar'), rota(async (req, res) => {
+  const { id } = validar(req, 'params', idSchema);
+  const { ativo } = validar(req, 'body', situacaoSchema);
+  const fornecedor = await servico.definirAtivo(id, ativo, { usuarioId: req.usuario!.id, ip: req.ipCliente });
+  return ok(res, fornecedor, ativo ? 'Fornecedor ativado' : 'Fornecedor inativado');
 }));
 
 fornecedoresRouter.post('/:id/produtos', exigirPermissao('fornecedores.editar'), rota(async (req, res) => {

@@ -141,6 +141,47 @@ export const CONFIG_ESTOQUE: ConfigImportacao = {
   },
 };
 
+export const CONFIG_FORNECEDORES: ConfigImportacao = {
+  entidade: 'fornecedores',
+  template: 'FORNECEDORES_ERP',
+  botao: 'Importar fornecedores',
+  titulo: 'Importar base de fornecedores (ERP)',
+  colunasUsadas: ['ID', 'FANTASIA', 'ATIVO', 'NOME', 'ENDERECO', 'NUMERO', 'BAIRRO', 'CIDADE', 'CEP',
+    'ESTADO', 'CNPJCPF', 'IERG', 'CONTATO', 'FONES', 'EMAILCONTATO', 'DTULTIMOPEDIDO', 'VALORULTPEDIDO'],
+  obrigatorias: ['ID', 'NOME'],
+  instrucao: 'Selecione a planilha de fornecedores exportada do ERP, com as colunas ID, FANTASIA, '
+    + 'ATIVO, NOME, ENDERECO, NUMERO, BAIRRO, CIDADE, CEP, ESTADO, CNPJCPF, IERG, CONTATO, FONES, '
+    + 'EMAILCONTATO, DTULTIMOPEDIDO e VALORULTPEDIDO. Nada e gravado antes da sua confirmacao.',
+  aviso: 'O ID do ERP identifica o fornecedor: importar de novo atualiza, nao duplica. Um '
+    + 'fornecedor ja cadastrado com o mesmo CNPJ recebe o ID e nao e repetido. A coluna ATIVO '
+    + '(S/N) define a situacao; CNPJ e CEP que o Excel guardou sem o zero a esquerda sao corrigidos.',
+  sucesso: 'Base de fornecedores atualizada. Use o botao de cada linha para ativar ou inativar.',
+  contadores: ['Fornecedores novos', 'Fornecedores atualizados', 'Sem alteracao', 'Rejeitados'],
+  notaDescartadas: 'Linhas repetidas ou vazias',
+  resumir: (p) => {
+    const iId = idx(p, 'ID');
+    const iAtivo = idx(p, 'ATIVO');
+    const iDoc = idx(p, 'CNPJCPF');
+    const iData = idx(p, 'DTULTIMOPEDIDO');
+    const ids = new Set<string>();
+    let ativos = 0;
+    let comDoc = 0;
+    let comPedido = 0;
+    for (const l of p.linhas) {
+      ids.add(String(l[iId]));
+      if (String(l[iAtivo] ?? '').trim().toUpperCase().startsWith('S')) ativos++;
+      if (String(l[iDoc] ?? '').replace(/\D/g, '')) comDoc++;
+      if (String(l[iData] ?? '').trim()) comPedido++;
+    }
+    return [
+      { rotulo: 'Fornecedores', valor: numero(ids.size) },
+      { rotulo: 'Ativos no ERP', valor: numero(ativos), nota: `${numero(ids.size - ativos)} inativos` },
+      { rotulo: 'Com CNPJ/CPF', valor: numero(comDoc) },
+      { rotulo: 'Ja receberam pedido', valor: numero(comPedido) },
+    ];
+  },
+};
+
 type Etapa = 'escolher' | 'lendo' | 'conferir' | 'gravando' | 'atualizando' | 'concluido';
 
 interface Conferencia {

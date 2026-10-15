@@ -12,7 +12,7 @@ const soDigitos = (valor: unknown) => (typeof valor === 'string' ? valor.replace
 export const fornecedorBaseSchema = z.object({
   razao_social: z.string().trim().min(3).max(200),
   nome_fantasia: z.string().trim().max(200).nullish(),
-  cnpj: z.preprocess(soDigitos, z.string().regex(/^[0-9]{14}$/, 'CNPJ deve ter 14 digitos').nullish()),
+  cnpj: z.preprocess(soDigitos, z.string().regex(/^([0-9]{11}|[0-9]{14})$/, 'CNPJ (14 digitos) ou CPF (11 digitos)').nullish()),
   inscricao_estadual: z.string().trim().max(30).nullish(),
   email: z.string().email().nullish(),
   telefone: z.string().trim().max(30).nullish(),
@@ -52,6 +52,8 @@ export const vinculoProdutoSchema = z.object({
   fornecedor_principal: z.coerce.boolean().default(false),
   ativo: z.coerce.boolean().default(true),
 });
+
+export const situacaoSchema = z.object({ ativo: z.boolean() });
 
 export const idSchema = z.object({ id: z.coerce.number().int().positive() });
 export type FiltroFornecedores = z.infer<typeof listarFornecedoresSchema>;

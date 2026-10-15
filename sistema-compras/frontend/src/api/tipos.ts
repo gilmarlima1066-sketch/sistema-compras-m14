@@ -61,6 +61,10 @@ export interface Fornecedor {
   lead_time_padrao_dias: number | null;
   total_produtos: number;
   ativo: boolean;
+  codigo_erp: string | null;
+  contato: string | null;
+  data_ultimo_pedido: string | null;
+  valor_ultimo_pedido: number | null;
 }
 
 export interface PosicaoEstoque {

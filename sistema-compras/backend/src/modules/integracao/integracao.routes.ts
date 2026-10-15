@@ -68,6 +68,7 @@ const CONCILIAR = exigirPermissao('integracao.conciliar');
 const PERMISSAO_POR_ENTIDADE: Record<string, string> = {
   vendas: 'demanda.importar',
   estoque: 'estoque.movimentar',
+  fornecedores: 'fornecedores.criar',
 };
 const IMPORTAR_ARQUIVO = exigirPermissao(
   'integracao.importar', ...Object.values(PERMISSAO_POR_ENTIDADE));

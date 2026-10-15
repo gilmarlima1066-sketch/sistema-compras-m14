@@ -39,6 +39,32 @@ function lerPastaDeTrabalho(bytes: Uint8Array): XLSX.WorkBook {
   return XLSX.read(texto, { type: 'string', raw: true, dense: true });
 }
 
+/**
+ * O texto formatado de um numero inteiro longo em formato "Geral" e notacao
+ * cientifica: o CNPJ 9519473000174 vira "9,51947E+12" e o codigo de barras
+ * 7898663866223 vira "7,89866E+12" - digitos perdidos. Para esses o valor
+ * verdadeiro da celula e o que vale.
+ */
+function preservarInteirosLongos(planilha: XLSX.WorkSheet) {
+  const corrigir = (celula: XLSX.CellObject | undefined) => {
+    if (celula?.t === 'n' && typeof celula.v === 'number' && Number.isInteger(celula.v)
+        && Math.abs(celula.v) >= 1e10 && (!celula.z || celula.z === 'General')) {
+      celula.w = String(celula.v);
+    }
+  };
+  // Modo denso: a 0.18 guarda as linhas na propria folha; versoes novas em "!data".
+  type Linhas = Array<Array<XLSX.CellObject | undefined> | undefined>;
+  const densa = (planilha as unknown as { '!data'?: Linhas })['!data']
+    ?? (Array.isArray(planilha) ? (planilha as unknown as Linhas) : null);
+  if (densa) {
+    for (const linha of densa) linha?.forEach(corrigir);
+    return;
+  }
+  for (const chave of Object.keys(planilha)) {
+    if (chave[0] !== '!') corrigir(planilha[chave] as XLSX.CellObject);
+  }
+}
+
 self.onmessage = async (evento: MessageEvent<{ arquivo: File }>) => {
   try {
     enviar({ tipo: 'progresso', etapa: 'Lendo o arquivo...' });
@@ -49,6 +75,7 @@ self.onmessage = async (evento: MessageEvent<{ arquivo: File }>) => {
     const planilha = livro.SheetNames.length ? livro.Sheets[livro.SheetNames[0]!] : undefined;
     if (!planilha) throw new Error('O arquivo nao contem planilhas validas');
 
+    preservarInteirosLongos(planilha);
     enviar({ tipo: 'progresso', etapa: 'Separando as linhas...' });
     const matriz = XLSX.utils.sheet_to_json<unknown[]>(planilha, {
       header: 1, defval: '', raw: false, dateNF: 'DD/MM/YYYY', blankrows: false,
