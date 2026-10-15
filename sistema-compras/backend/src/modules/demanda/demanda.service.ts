@@ -122,8 +122,10 @@ export async function dashboard(filtro: FiltroPeriodo) {
   const r = rows[0] as Record<string, number>;
   const quantidade = Number(r.quantidade_vendida ?? 0);
   const anterior = Number(r.quantidade_anterior ?? 0);
+  const detalhe = await detalheDashboard(filtro, periodo, anteriorInicio, anteriorFim);
 
   return {
+    ...detalhe,
     periodo,
     periodo_anterior: { inicio: anteriorInicio, fim: anteriorFim },
     quantidade_vendida: quantidade,
@@ -141,6 +143,102 @@ export async function dashboard(filtro: FiltroPeriodo) {
     produtos_sazonais: Number(r.produtos_sazonais ?? 0),
     demanda_reprimida_estimada: Number(r.demanda_reprimida ?? 0),
     valor_reprimido_estimado: Number(r.valor_reprimido ?? 0),
+  };
+}
+
+interface LinhaProdutoDash {
+  produto_id: number; codigo: string; descricao: string; curva: string | null;
+  quantidade: number; valor: number; quantidade_anterior: number; valor_anterior: number;
+}
+
+/**
+ * O que o painel desenha: a venda dia a dia contra o periodo anterior, quem
+ * fatura, quem mais subiu ou caiu (em reais, para comparar produtos de
+ * unidades diferentes) e quanto do faturamento cada curva ABC concentra.
+ */
+async function detalheDashboard(
+  filtro: FiltroPeriodo, periodo: Periodo, anteriorInicio: string, anteriorFim: string,
+) {
+  const valores: unknown[] = [anteriorInicio, periodo.fim];
+  const cond = condicoesProduto(filtro, valores);
+  const onde = cond.length ? `AND ${cond.join(' AND ')}` : '';
+  const base = `
+    SELECT d.produto_id, d.data_venda, d.quantidade, d.valor
+      FROM mv_demanda_diaria d
+      JOIN produtos p ON p.id = d.produto_id AND p.deleted_at IS NULL
+     WHERE d.data_venda BETWEEN $1 AND $2 ${onde}`;
+  const corte = valores.length + 1;
+
+  const [serie, produtos] = await Promise.all([
+    query<{ dia: string; quantidade: number; valor: number }>(`
+      WITH base AS (${base})
+      SELECT g.dia::date::text AS dia,
+             coalesce(sum(b.quantidade), 0)::float8 AS quantidade,
+             coalesce(sum(b.valor), 0)::float8 AS valor
+        FROM generate_series($1::date, $2::date, interval '1 day') AS g(dia)
+        LEFT JOIN base b ON b.data_venda = g.dia::date
+       GROUP BY g.dia ORDER BY g.dia`, valores),
+    query<LinhaProdutoDash>(`
+      WITH base AS (${base})
+      SELECT b.produto_id, p.codigo, p.descricao, p.classificacao_abc::text AS curva,
+             coalesce(sum(b.quantidade) FILTER (WHERE b.data_venda >= $${corte}), 0)::float8 AS quantidade,
+             coalesce(sum(b.valor)      FILTER (WHERE b.data_venda >= $${corte}), 0)::float8 AS valor,
+             coalesce(sum(b.quantidade) FILTER (WHERE b.data_venda <  $${corte}), 0)::float8 AS quantidade_anterior,
+             coalesce(sum(b.valor)      FILTER (WHERE b.data_venda <  $${corte}), 0)::float8 AS valor_anterior
+        FROM base b JOIN produtos p ON p.id = b.produto_id
+       GROUP BY b.produto_id, p.codigo, p.descricao, p.classificacao_abc`,
+    [...valores, periodo.inicio]),
+  ]);
+
+  // A serie vem do inicio do periodo anterior ao fim do atual: os primeiros
+  // `dias` pontos sao o anterior, alinhados dia a dia com o atual.
+  const pontos = serie.rows.map((d) => ({
+    dia: d.dia, quantidade: Number(d.quantidade), valor: Number(d.valor),
+  }));
+  const anterior = pontos.slice(0, periodo.dias);
+  const atual = pontos.slice(periodo.dias);
+
+  const linhas = produtos.rows;
+  const faturamento = linhas.reduce((s, l) => s + l.valor, 0);
+  const resumo = (l: LinhaProdutoDash) => ({
+    produto_id: Number(l.produto_id), codigo: l.codigo, descricao: l.descricao, curva: l.curva,
+    quantidade: l.quantidade, valor: l.valor,
+    quantidade_anterior: l.quantidade_anterior, valor_anterior: l.valor_anterior,
+    diferenca_valor: l.valor - l.valor_anterior,
+    participacao: faturamento > 0 ? (l.valor / faturamento) * 100 : 0,
+  });
+
+  const vendidos = linhas.filter((l) => l.valor > 0).sort((a, b) => b.valor - a.valor);
+  const porDiferenca = [...linhas].sort((a, b) => (b.valor - b.valor_anterior) - (a.valor - a.valor_anterior));
+
+  const curvas = new Map<string, { produtos: number; valor: number }>();
+  for (const l of vendidos) {
+    const c = l.curva ?? 'SEM';
+    const atualCurva = curvas.get(c) ?? { produtos: 0, valor: 0 };
+    curvas.set(c, { produtos: atualCurva.produtos + 1, valor: atualCurva.valor + l.valor });
+  }
+
+  // Concentracao: quantos produtos fazem 80% do faturamento.
+  let acumulado = 0;
+  let produtos80 = 0;
+  for (const l of vendidos) {
+    if (acumulado >= faturamento * 0.8) break;
+    acumulado += l.valor;
+    produtos80 += 1;
+  }
+
+  return {
+    serie: { atual, anterior },
+    top_produtos: vendidos.slice(0, 10).map(resumo),
+    maiores_altas: porDiferenca.filter((l) => l.valor - l.valor_anterior > 0).slice(0, 5).map(resumo),
+    maiores_quedas: porDiferenca.filter((l) => l.valor - l.valor_anterior < 0).reverse().slice(0, 5).map(resumo),
+    curva_abc: ['A', 'B', 'C', 'SEM'].map((c) => ({
+      curva: c,
+      produtos: curvas.get(c)?.produtos ?? 0,
+      valor: curvas.get(c)?.valor ?? 0,
+      participacao: faturamento > 0 ? ((curvas.get(c)?.valor ?? 0) / faturamento) * 100 : 0,
+    })),
+    concentracao: { produtos_80: produtos80, produtos: vendidos.length },
   };
 }
 
