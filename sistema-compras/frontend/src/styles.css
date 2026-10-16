@@ -1120,3 +1120,8 @@ button.ranking__linha:focus-visible, button.divergente__linha:focus-visible { ou
 }
 .link:hover { color: var(--acento); text-decoration: underline; }
 .link:focus-visible { outline: 2px solid var(--acento); outline-offset: 1px; }
+
+/* --- historico de industrializados -------------------------------------- */
+.industrializados__topo { display: flex; align-items: center; gap: 8px 16px; flex-wrap: wrap; padding: 12px 14px; border-bottom: 1px solid var(--borda); }
+.industrializados__resumo { margin: 0; font-size: 13.5px; color: var(--texto-2); }
+.industrializados__resumo strong { color: var(--texto); }

@@ -8,6 +8,7 @@ import { exigirPermissao } from '../../middlewares/autorizar.js';
 import * as demanda from './demanda.service.js';
 import * as previsao from './previsao.service.js';
 import * as analise from './analise.service.js';
+import * as industrializacao from './industrializacao.service.js';
 import {
   analiseDemandaSchema, calcularPrevisaoSchema, classificarAbcXyzSchema,
   classificarReprimidaSchema, comparacaoSchema, configuracoesSchema,
@@ -47,6 +48,24 @@ demandaRouter.get('/vendas', LER, rota(async (req, res) => {
   const filtro = validar(req, 'query', listarVendasSchema);
   const { dados, meta } = await demanda.listarVendas(filtro);
   return ok(res, dados, 'Historico de vendas', meta);
+}));
+
+// Historico de industrializados: produto que saiu do estoque para ser processado.
+const industrializacaoSchema = z.object({
+  busca: z.string().trim().max(120).optional(),
+  situacao: z.string().trim().max(10).optional(),
+  data_inicio: z.coerce.date().optional(),
+  data_fim: z.coerce.date().optional(),
+  dias: z.coerce.number().int().min(1).max(3650).optional(),
+  visao: z.enum(['itens', 'produtos']).default('itens'),
+  pagina: z.coerce.number().int().min(1).default(1),
+  limite: z.coerce.number().int().min(1).max(200).default(25),
+});
+
+demandaRouter.get('/industrializacao', LER, rota(async (req, res) => {
+  const filtro = validar(req, 'query', industrializacaoSchema);
+  const { dados, meta } = await industrializacao.listar(filtro);
+  return ok(res, dados, 'Historico de industrializados', meta);
 }));
 
 demandaRouter.post('/vendas/importar', IMPORTAR, rota(async (req, res) => {

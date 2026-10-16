@@ -3,7 +3,7 @@ import { api, ErroApi } from '../api/client';
 import { useAuth } from '../auth/AuthContext';
 import { useLista } from '../hooks/useLista';
 import { CabecalhoPagina } from '../componentes/Cabecalho';
-import { CONFIG_VENDAS, ImportarPlanilha } from '../componentes/ImportarPlanilha';
+import { CONFIG_INDUSTRIALIZACAO, CONFIG_VENDAS, ImportarPlanilha } from '../componentes/ImportarPlanilha';
 import {
   Aviso, Cartao, Entrada, Etiqueta, Indicador, Modal, Paginacao, Selecao, Vazio,
   data as fmtData, dataHora, moeda, numero,
@@ -14,11 +14,12 @@ import {
   Ranking, type PontoSerie,
 } from '../componentes/painel';
 
-type Aba = 'dashboard' | 'vendas' | 'analise' | 'previsao' | 'sazonalidade' | 'abc' | 'ruptura' | 'parametros';
+type Aba = 'dashboard' | 'vendas' | 'industrializados' | 'analise' | 'previsao' | 'sazonalidade' | 'abc' | 'ruptura' | 'parametros';
 
 const ABAS: Array<{ id: Aba; texto: string }> = [
   { id: 'dashboard', texto: 'Dashboard' },
   { id: 'vendas', texto: 'Historico de vendas' },
+  { id: 'industrializados', texto: 'Historico de industrializados' },
   { id: 'analise', texto: 'Analise de demanda' },
   { id: 'previsao', texto: 'Previsao' },
   { id: 'sazonalidade', texto: 'Sazonalidade' },
@@ -152,6 +153,9 @@ export function Demanda() {
       <div key={versao}>
         {aba === 'dashboard' && <PainelDashboard periodo={periodo} setPeriodo={setPeriodo} irPara={setAba} />}
         {aba === 'vendas' && <PainelVendas periodo={periodo} setPeriodo={setPeriodo} />}
+        {aba === 'industrializados' && (
+          <PainelIndustrializados periodo={periodo} setPeriodo={setPeriodo} podeImportar={podeImportar} />
+        )}
         {aba === 'analise' && <PainelAnalise periodo={periodo} setPeriodo={setPeriodo} />}
         {aba === 'previsao' && <PainelPrevisao podeCalcular={pode('demanda.prever')} />}
         {aba === 'sazonalidade' && <PainelSazonalidade podeCalcular={pode('demanda.prever')} />}
@@ -634,6 +638,147 @@ function EsqueletoDashboard() {
         <div className="cartao"><div className="cartao__corpo"><Esqueleto altura={240} /></div></div>
       </div>
     </div>
+  );
+}
+
+/* ---------------------------------------------------------- industrializados */
+
+interface ItemIndustrializado {
+  id: number; documento_erp: string; item: number; data_inclusao: string; situacao: string | null;
+  usuario: string | null; estoque_saida: string | null; estoque_entrada: string | null;
+  produto_codigo: string; produto_descricao: string | null;
+  quantidade: number; peso_liquido: number | null; peso_total: number | null;
+}
+
+interface ProdutoIndustrializado {
+  produto_codigo: string; produto_descricao: string | null; itens: number; documentos: number;
+  quantidade: number; peso_total: number; peso_liquido: number | null; ultima_data: string;
+}
+
+interface ResumoIndustrializado {
+  itens: number; documentos: number; produtos: number; quantidade: number; peso_total: number; fora_de_ok: number;
+}
+
+/**
+ * Produto que saiu do estoque para ser processado (fracionado, embalado):
+ * consumo interno, que nao aparece como venda mas tira produto da prateleira.
+ */
+function PainelIndustrializados({ periodo, setPeriodo, podeImportar }: {
+  periodo: Periodo; setPeriodo: (p: Periodo) => void; podeImportar: boolean;
+}) {
+  const [busca, setBusca] = useState('');
+  const [situacao, setSituacao] = useState('');
+  const [visao, setVisao] = useState<'itens' | 'produtos'>('produtos');
+  const [pagina, setPagina] = useState(1);
+
+  const { itens, meta, carregando, erro, recarregar } = useLista<ItemIndustrializado & ProdutoIndustrializado>(
+    '/demanda/industrializacao',
+    { pagina, limite: 25, busca, situacao, visao, ...paramsPeriodo(periodo) },
+  );
+  const resumo = meta?.resumo as ResumoIndustrializado | undefined;
+  const per = meta?.periodo as { inicio: string; fim: string } | undefined;
+
+  return (
+    <Cartao
+      titulo="Historico de industrializados"
+      acoes={(
+        <div className="filtros">
+          <Entrada rotulo="Buscar" valor={busca} aoMudar={(v) => { setBusca(v); setPagina(1); }}
+            placeholder="produto, documento ou usuario" />
+          <Selecao rotulo="Situacao" valor={situacao} aoMudar={(v) => { setSituacao(v); setPagina(1); }} vazio="Todas"
+            opcoes={[{ valor: 'OK', texto: 'OK' }, { valor: 'AB', texto: 'AB' }, { valor: 'AL', texto: 'AL' }]} />
+          <FiltroPeriodo periodo={periodo} aoMudar={(p) => { setPeriodo(p); setPagina(1); }} />
+          {podeImportar && <ImportarPlanilha config={CONFIG_INDUSTRIALIZACAO} aoConcluir={() => void recarregar()} />}
+        </div>
+      )}
+      semCorpo
+    >
+      <div className="industrializados__topo">
+        <div className="alternador" role="group" aria-label="Visao">
+          {([['produtos', 'Por produto'], ['itens', 'Lancamentos']] as const).map(([v, t]) => (
+            <button key={v} type="button" aria-pressed={visao === v} className={visao === v ? 'ativo' : undefined}
+              onClick={() => { setVisao(v); setPagina(1); }}>{t}</button>
+          ))}
+        </div>
+        {resumo && per && resumo.itens > 0 && (
+          <p className="industrializados__resumo">
+            De {fmtData(per.inicio)} a {fmtData(per.fim)}: <strong>{numero(resumo.quantidade)}</strong> unidades,
+            {' '}<strong>{numero(resumo.peso_total)} kg</strong>, em {numero(resumo.documentos)} documentos
+            e {numero(resumo.produtos)} produtos.
+            {resumo.fora_de_ok > 0 && ` ${numero(resumo.fora_de_ok)} itens fora de OK nao entram nos totais.`}
+          </p>
+        )}
+      </div>
+      {erro && <Aviso>{erro}</Aviso>}
+      {carregando && <Vazio>Carregando…</Vazio>}
+      {!carregando && !itens.length && (
+        <Vazio>
+          {resumo === undefined || resumo.itens === 0
+            ? 'Nenhum industrializado no periodo. Importe o relatorio de fracionados do ERP em "Importar industrializados".'
+            : 'Nada encontrado no filtro informado.'}
+        </Vazio>
+      )}
+      {!!itens.length && visao === 'produtos' && (
+        <div className="tabela-rolagem">
+          <table className="tabela">
+            <thead>
+              <tr>
+                <th>Codigo</th><th>Produto</th>
+                <th className="num">Unidades</th><th className="num">Peso un. (kg)</th>
+                <th className="num">Peso total (kg)</th><th className="num">Documentos</th><th>Ultimo</th>
+              </tr>
+            </thead>
+            <tbody>
+              {itens.map((p) => (
+                <tr key={p.produto_codigo}>
+                  <td className="mono">{p.produto_codigo}</td>
+                  <td className="celula-produto" title={p.produto_descricao ?? ''}>
+                    <span className="celula-produto__nome">{p.produto_descricao}</span>
+                  </td>
+                  <td className="num">{numero(p.quantidade, 0)}</td>
+                  <td className="num">{numero(p.peso_liquido, 2)}</td>
+                  <td className="num">{numero(p.peso_total, 0)}</td>
+                  <td className="num">{numero(p.documentos)}</td>
+                  <td>{fmtData(p.ultima_data)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {!!itens.length && visao === 'itens' && (
+        <div className="tabela-rolagem">
+          <table className="tabela">
+            <thead>
+              <tr>
+                <th>Data</th><th>Documento</th><th>Situacao</th><th>Usuario</th><th>Estoque</th>
+                <th>Codigo</th><th>Produto</th>
+                <th className="num">Qtd</th><th className="num">Peso un. (kg)</th><th className="num">Peso (kg)</th>
+              </tr>
+            </thead>
+            <tbody>
+              {itens.map((i) => (
+                <tr key={i.id}>
+                  <td>{fmtData(i.data_inclusao)}</td>
+                  <td className="mono">{i.documento_erp}</td>
+                  <td><Etiqueta texto={i.situacao ?? '—'} tom={i.situacao === 'OK' ? 'acento' : 'alerta'} /></td>
+                  <td>{i.usuario ?? '—'}</td>
+                  <td className="mono">{i.estoque_saida ?? '—'} → {i.estoque_entrada ?? '—'}</td>
+                  <td className="mono">{i.produto_codigo}</td>
+                  <td className="celula-produto" title={i.produto_descricao ?? ''}>
+                    <span className="celula-produto__nome">{i.produto_descricao}</span>
+                  </td>
+                  <td className="num">{numero(i.quantidade, 0)}</td>
+                  <td className="num">{numero(i.peso_liquido, 2)}</td>
+                  <td className="num">{numero(i.peso_total, 2)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      <Paginacao meta={meta} aoTrocar={setPagina} />
+    </Cartao>
   );
 }
 

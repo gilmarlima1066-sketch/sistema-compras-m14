@@ -226,6 +226,47 @@ export const CONFIG_HISTORICO_COMPRAS: ConfigImportacao = {
   },
 };
 
+export const CONFIG_INDUSTRIALIZACAO: ConfigImportacao = {
+  entidade: 'industrializacao',
+  template: 'HISTORICO_INDUSTRIALIZACAO',
+  botao: 'Importar industrializados',
+  titulo: 'Importar historico de industrializados',
+  colunasUsadas: ['ID', 'ESTOQUESAI', 'ESTOQUEENTRA', 'SITUACAO', 'DTINCLUSAO', 'USUARIOINC', 'QTDE',
+    'CODPRODUTO', 'DESCRICAO', 'PESOLIQ'],
+  obrigatorias: ['ID', 'DTINCLUSAO', 'QTDE', 'CODPRODUTO'],
+  instrucao: 'Selecione o relatorio de industrializados (fracionados) do ERP, em Excel ou CSV, com '
+    + 'as colunas ID, ESTOQUESAI, ESTOQUEENTRA, SITUACAO, DTINCLUSAO, USUARIOINC, QTDE, CODPRODUTO, '
+    + 'DESCRICAO e PESOLIQ. Nada e gravado antes da sua confirmacao.',
+  aviso: 'O ID e o documento do ERP e pode ter varios produtos. Importar o mesmo periodo de novo '
+    + 'atualiza em vez de duplicar. PESOLIQ e o peso por unidade: o peso do item e QTDE x PESOLIQ.',
+  sucesso: 'Historico de industrializados atualizado.',
+  contadores: ['Itens novos', 'Itens atualizados', 'Descartados', 'Rejeitados'],
+  notaDescartadas: 'Linhas sem uso',
+  resumir: (p) => {
+    const iId = idx(p, 'ID');
+    const iCod = idx(p, 'CODPRODUTO');
+    const iQtd = idx(p, 'QTDE');
+    const iPeso = idx(p, 'PESOLIQ');
+    const iSit = idx(p, 'SITUACAO');
+    const docs = new Set<string>();
+    const produtos = new Set<string>();
+    let peso = 0;
+    let foraOk = 0;
+    for (const l of p.linhas) {
+      docs.add(String(l[iId]));
+      produtos.add(String(l[iCod]));
+      peso += num(l[iQtd]) * num(l[iPeso]);
+      if (String(l[iSit] ?? '').trim().toUpperCase() !== 'OK') foraOk++;
+    }
+    return [
+      { rotulo: 'Documentos', valor: numero(docs.size), nota: `${numero(p.linhas.length)} itens` },
+      { rotulo: 'Produtos', valor: numero(produtos.size) },
+      { rotulo: 'Peso industrializado', valor: `${numero(peso)} kg` },
+      { rotulo: 'Fora de OK', valor: numero(foraOk), nota: 'situacao AB, AL...' },
+    ];
+  },
+};
+
 type Etapa = 'escolher' | 'lendo' | 'conferir' | 'gravando' | 'atualizando' | 'concluido';
 
 interface Conferencia {

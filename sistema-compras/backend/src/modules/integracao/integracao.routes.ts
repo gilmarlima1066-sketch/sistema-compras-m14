@@ -70,6 +70,7 @@ const PERMISSAO_POR_ENTIDADE: Record<string, string> = {
   estoque: 'estoque.movimentar',
   fornecedores: 'fornecedores.criar',
   historico_compras: 'compras.planejar',
+  industrializacao: 'demanda.importar',
 };
 const IMPORTAR_ARQUIVO = exigirPermissao(
   'integracao.importar', ...Object.values(PERMISSAO_POR_ENTIDADE));

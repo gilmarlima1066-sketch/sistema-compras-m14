@@ -1246,11 +1246,129 @@ const gravarHistoricoCompras = async (
   return saida;
 };
 
+// ===========================================================================
+// INDUSTRIALIZACAO — produto que sai de um estoque para ser processado
+// ===========================================================================
+
+interface Industrializacao {
+  documento_erp: string; item: number; estoque_saida: string | null; estoque_entrada: string | null;
+  situacao: string | null; data_inclusao: string; usuario: string | null;
+  produto_codigo: string; produto_descricao: string | null; produto_id: number | null;
+  quantidade: number; peso_liquido: number | null; importacao_id: number | null;
+}
+
+/**
+ * O ID do ERP e o documento: varios produtos por ID, e as vezes o mesmo
+ * produto duas vezes. Cada linha vira um item numerado (1, 2, ...) dentro de
+ * documento + produto, na ordem do arquivo; a contagem fica no estado da
+ * importacao para valer entre lotes. Produto ainda sem cadastro fica
+ * guardado pelo codigo e e ligado quando o cadastro chegar.
+ */
+const gravarIndustrializacao = async (
+  lote: Linha[], _contexto: ContextoSessao, estado: EstadoImportacao,
+): Promise<Saida> => {
+  const saida: Saida = {
+    criados: 0, atualizados: 0, descartados: 0, rejeitados: 0, motivos: new Map(),
+  };
+  const importacaoId = Number(estado.get('importacao_id')) || null;
+
+  const itens = (estado.get('industrializacao_itens') ?? {}) as Record<string, number>;
+  const lancamentos: Industrializacao[] = [];
+  for (const { dados } of lote) {
+    const documento = txt(dados['industrializacao.documento'])?.replace(/\.0+$/, '');
+    const data = txt(dados['industrializacao.data']);
+    const produto = txt(dados['produto.codigo'])?.toUpperCase();
+    const quantidade = numeroOuNulo(dados['industrializacao.quantidade']);
+    if (!documento || !data || !produto || quantidade === null) {
+      saida.rejeitados += 1;
+      conta(saida.motivos, 'linha sem ID, data, produto ou quantidade');
+      continue;
+    }
+    const chave = `${documento}|${produto}`;
+    const item = (itens[chave] ?? 0) + 1;
+    itens[chave] = item;
+    if (item > 1) conta(saida.motivos, 'produto repetido no mesmo documento: gravado como outro item');
+    lancamentos.push({
+      documento_erp: documento,
+      item,
+      estoque_saida: txt(dados['industrializacao.estoque_saida'])?.replace(/\.0+$/, '') ?? null,
+      estoque_entrada: txt(dados['industrializacao.estoque_entrada'])?.replace(/\.0+$/, '') ?? null,
+      situacao: txt(dados['industrializacao.situacao']),
+      data_inclusao: data,
+      usuario: txt(dados['industrializacao.usuario']),
+      produto_codigo: produto,
+      produto_descricao: txt(dados['produto.descricao']),
+      produto_id: null,
+      quantidade,
+      peso_liquido: numeroOuNulo(dados['industrializacao.peso_liquido']),
+      importacao_id: importacaoId,
+    });
+  }
+  estado.set('industrializacao_itens', itens);
+  if (!lancamentos.length) return saida;
+
+  const cliente = await pool.connect();
+  try {
+    await cliente.query('BEGIN');
+    const produtos = await resolverProdutos(cliente, [...new Set(lancamentos.map((l) => l.produto_codigo))]);
+    const semProduto = new Set<string>();
+    for (const l of lancamentos) {
+      l.produto_id = produtos.get(l.produto_codigo) ?? null;
+      if (l.produto_id === null) semProduto.add(l.produto_codigo);
+    }
+    if (semProduto.size) {
+      conta(saida.motivos, 'produto ainda nao cadastrado: lancamento guardado pelo codigo', semProduto.size);
+    }
+
+    const { rows } = await cliente.query<{ inserido: boolean }>(`
+      INSERT INTO historico_industrializacao
+        (documento_erp, item, estoque_saida, estoque_entrada, situacao, data_inclusao, usuario,
+         produto_codigo, produto_descricao, produto_id, quantidade, peso_liquido, importacao_id)
+      SELECT x.documento_erp, x.item, x.estoque_saida, x.estoque_entrada, x.situacao, x.data_inclusao,
+             x.usuario, x.produto_codigo, x.produto_descricao, x.produto_id, x.quantidade,
+             x.peso_liquido, x.importacao_id
+        FROM jsonb_to_recordset($1::jsonb) AS x(
+          documento_erp text, item smallint, estoque_saida text, estoque_entrada text, situacao text,
+          data_inclusao date, usuario text, produto_codigo text, produto_descricao text,
+          produto_id bigint, quantidade numeric, peso_liquido numeric, importacao_id bigint)
+      ON CONFLICT (documento_erp, produto_codigo, item) DO UPDATE
+        SET estoque_saida = EXCLUDED.estoque_saida,
+            estoque_entrada = EXCLUDED.estoque_entrada,
+            situacao = EXCLUDED.situacao,
+            data_inclusao = EXCLUDED.data_inclusao,
+            usuario = EXCLUDED.usuario,
+            produto_descricao = coalesce(EXCLUDED.produto_descricao, historico_industrializacao.produto_descricao),
+            produto_id = coalesce(EXCLUDED.produto_id, historico_industrializacao.produto_id),
+            quantidade = EXCLUDED.quantidade,
+            peso_liquido = EXCLUDED.peso_liquido,
+            importacao_id = EXCLUDED.importacao_id,
+            updated_at = now()
+      RETURNING (xmax = 0) AS inserido`, [JSON.stringify(lancamentos)]);
+    for (const r of rows) {
+      if (r.inserido) saida.criados += 1; else saida.atualizados += 1;
+    }
+
+    await cliente.query(`
+      UPDATE historico_industrializacao h SET produto_id = p.id
+        FROM produtos p
+       WHERE h.produto_id IS NULL AND upper(p.codigo) = h.produto_codigo
+         AND p.deleted_at IS NULL`);
+    await cliente.query('COMMIT');
+  } catch (erro) {
+    await cliente.query('ROLLBACK');
+    throw erro;
+  } finally {
+    cliente.release();
+  }
+  return saida;
+};
+
 registrarGravador('vendas', gravarVendas);
 registrarGravador('produtos', gravarProdutos);
 registrarGravador('fornecedores', gravarFornecedores);
 registrarGravador('produto_fornecedor', gravarPrecos);
 registrarGravador('estoque', gravarEstoque);
 registrarGravador('historico_compras', gravarHistoricoCompras);
+registrarGravador('industrializacao', gravarIndustrializacao);
 
 export { gravarVendas, gravarProdutos, gravarFornecedores, gravarPrecos, gravarEstoque };
