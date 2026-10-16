@@ -282,7 +282,9 @@ export function aplicarLinha(
     }
 
     if (ausente) {
-      dados[m.campo_interno] = null;
+      // Dois nomes de coluna podem alimentar o mesmo campo (ALIQUOTAICMS ou
+      // ALIQUOTA): o ausente nao apaga o que o outro ja preencheu.
+      dados[m.campo_interno] ??= null;
       continue;
     }
 

@@ -14,6 +14,7 @@ import { api, ErroApi } from '../api/client';
 import type { Meta } from '../api/tipos';
 import { useAuth } from '../auth/AuthContext';
 import { CabecalhoPagina } from '../componentes/Cabecalho';
+import { HistoricoCompras } from './HistoricoCompras';
 import {
   Aviso, Cartao, Entrada, Etiqueta, Indicador, Modal, Paginacao, Selecao, Vazio,
   data, moeda, numero,
@@ -60,7 +61,7 @@ const ORIGEM: Record<string, string> = {
 const erroDe = (e: unknown, padrao: string) => (e instanceof ErroApi ? e.message : padrao);
 
 export function GestaoCompras() {
-  const [aba, setAba] = useState<'painel' | 'politicas'>('painel');
+  const [aba, setAba] = useState<'painel' | 'historico' | 'politicas'>('painel');
 
   return (
     <>
@@ -72,10 +73,14 @@ export function GestaoCompras() {
       <nav className="abas">
         <button type="button" className={`abas__item${aba === 'painel' ? ' abas__item--ativo' : ''}`}
           onClick={() => setAba('painel')}>Painel</button>
+        <button type="button" className={`abas__item${aba === 'historico' ? ' abas__item--ativo' : ''}`}
+          onClick={() => setAba('historico')}>Historico de compras</button>
         <button type="button" className={`abas__item${aba === 'politicas' ? ' abas__item--ativo' : ''}`}
           onClick={() => setAba('politicas')}>Politicas de compra</button>
       </nav>
-      {aba === 'painel' ? <Painel /> : <Politicas />}
+      {aba === 'painel' && <Painel />}
+      {aba === 'historico' && <HistoricoCompras />}
+      {aba === 'politicas' && <Politicas />}
     </>
   );
 }

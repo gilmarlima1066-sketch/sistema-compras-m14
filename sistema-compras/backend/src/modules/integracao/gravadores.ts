@@ -1094,10 +1094,163 @@ async function cadastrarProdutos(
 // Registro
 // ===========================================================================
 
+// ===========================================================================
+// HISTORICO DE COMPRAS — entradas do ERP (quem vendeu, quando, a quanto)
+// ===========================================================================
+
+interface CompraErp {
+  data_entrada: string; pedido: string; produto_codigo: string; produto_descricao: string | null;
+  produto_id: number | null; fornecedor_codigo_erp: string; fornecedor_nome: string | null;
+  fornecedor_id: number | null; kg_caixa: number | null; quantidade_caixas: number;
+  total_kg: number | null; preco_caixa: number | null; preco_kg: number | null;
+  aliquota_icms: number | null; aliquota_pis_cofins: number | null;
+  aliquota_icms_reduzida: number | null; tipo: string | null; importacao_id: number | null;
+}
+
+const numeroOuNulo = (v: unknown): number | null =>
+  (typeof v === 'number' && Number.isFinite(v) ? v : null);
+
+/**
+ * Cada linha e um item recebido. Produto e fornecedor sao ligados pelo codigo
+ * (PARCEIRO_ID = ID do ERP da base de fornecedores); se ainda nao existem, a
+ * compra e guardada pelo codigo e ligada quando o cadastro chegar - historico
+ * de preco nao se joga fora por falta de cadastro.
+ */
+const gravarHistoricoCompras = async (
+  lote: Linha[], contexto: ContextoSessao, estado: EstadoImportacao,
+): Promise<Saida> => {
+  const saida: Saida = {
+    criados: 0, atualizados: 0, descartados: 0, rejeitados: 0, motivos: new Map(),
+  };
+  const importacaoId = Number(estado.get('importacao_id')) || null;
+
+  const porChave = new Map<string, CompraErp>();
+  for (const { dados } of lote) {
+    const data = txt(dados['compra.data_entrada']);
+    const pedido = txt(dados['compra.pedido'])?.replace(/\.0+$/, '');
+    const produto = txt(dados['produto.codigo'])?.toUpperCase();
+    const parceiro = txt(dados['fornecedor.codigo_erp'])?.replace(/\.0+$/, '');
+    const caixas = numeroOuNulo(dados['compra.quantidade_caixas']);
+    if (!data || !pedido || !produto || !parceiro || caixas === null) {
+      saida.rejeitados += 1;
+      conta(saida.motivos, 'linha sem data, PC, codigo, parceiro ou quantidade');
+      continue;
+    }
+    const compra: CompraErp = {
+      data_entrada: data, pedido, produto_codigo: produto,
+      produto_descricao: txt(dados['produto.descricao']), produto_id: null,
+      fornecedor_codigo_erp: parceiro, fornecedor_nome: txt(dados['fornecedor.nome']), fornecedor_id: null,
+      kg_caixa: numeroOuNulo(dados['compra.kg_caixa']),
+      quantidade_caixas: caixas,
+      total_kg: numeroOuNulo(dados['compra.total_kg']),
+      preco_caixa: numeroOuNulo(dados['compra.preco_caixa']),
+      preco_kg: numeroOuNulo(dados['compra.preco_kg']),
+      aliquota_icms: numeroOuNulo(dados['compra.aliquota_icms']),
+      aliquota_pis_cofins: numeroOuNulo(dados['compra.aliquota_pis_cofins']),
+      aliquota_icms_reduzida: numeroOuNulo(dados['compra.aliquota_icms_reduzida']),
+      tipo: txt(dados['compra.tipo'])?.toUpperCase() ?? null,
+      importacao_id: importacaoId,
+    };
+    const chave = [pedido, produto, data, parceiro, caixas, compra.preco_caixa].join('|');
+    if (porChave.has(chave)) {
+      saida.descartados += 1;
+      conta(saida.motivos, 'linha repetida no arquivo (mesmo PC, produto, data, quantidade e preco)');
+    }
+    porChave.set(chave, compra);
+  }
+  if (!porChave.size) return saida;
+
+  const compras = [...porChave.values()];
+  const cliente = await pool.connect();
+  try {
+    await cliente.query('BEGIN');
+
+    const produtos = await resolverProdutos(cliente, [...new Set(compras.map((c) => c.produto_codigo))]);
+    const { rows: fornecedores } = await cliente.query<{ id: number; codigo_erp: string }>(
+      `SELECT id, codigo_erp FROM fornecedores
+        WHERE codigo_erp = ANY($1::text[]) AND deleted_at IS NULL`,
+      [[...new Set(compras.map((c) => c.fornecedor_codigo_erp))]]);
+    const fornecedorDe = new Map(fornecedores.map((f) => [f.codigo_erp, Number(f.id)]));
+
+    const semProduto = new Set<string>();
+    const semFornecedor = new Set<string>();
+    for (const c of compras) {
+      c.produto_id = produtos.get(c.produto_codigo) ?? null;
+      c.fornecedor_id = fornecedorDe.get(c.fornecedor_codigo_erp) ?? null;
+      if (c.produto_id === null) semProduto.add(c.produto_codigo);
+      if (c.fornecedor_id === null) semFornecedor.add(c.fornecedor_codigo_erp);
+    }
+    if (semProduto.size) {
+      conta(saida.motivos, 'produto ainda nao cadastrado: compra guardada pelo codigo', semProduto.size);
+    }
+    if (semFornecedor.size) {
+      conta(saida.motivos,
+        'parceiro sem cadastro na base de fornecedores: compra guardada pelo ID', semFornecedor.size);
+    }
+
+    const { rows } = await cliente.query<{ inserido: boolean }>(`
+      INSERT INTO historico_compras
+        (data_entrada, pedido, produto_codigo, produto_descricao, produto_id,
+         fornecedor_codigo_erp, fornecedor_nome, fornecedor_id, kg_caixa, quantidade_caixas,
+         total_kg, preco_caixa, preco_kg, aliquota_icms, aliquota_pis_cofins,
+         aliquota_icms_reduzida, tipo, importacao_id)
+      SELECT x.data_entrada, x.pedido, x.produto_codigo, x.produto_descricao, x.produto_id,
+             x.fornecedor_codigo_erp, x.fornecedor_nome, x.fornecedor_id, x.kg_caixa,
+             x.quantidade_caixas, x.total_kg, x.preco_caixa, x.preco_kg, x.aliquota_icms,
+             x.aliquota_pis_cofins, x.aliquota_icms_reduzida, x.tipo, x.importacao_id
+        FROM jsonb_to_recordset($1::jsonb) AS x(
+          data_entrada date, pedido text, produto_codigo text, produto_descricao text,
+          produto_id bigint, fornecedor_codigo_erp text, fornecedor_nome text,
+          fornecedor_id bigint, kg_caixa numeric, quantidade_caixas numeric, total_kg numeric,
+          preco_caixa numeric, preco_kg numeric, aliquota_icms numeric,
+          aliquota_pis_cofins numeric, aliquota_icms_reduzida numeric, tipo text, importacao_id bigint)
+      ON CONFLICT (pedido, produto_codigo, data_entrada, fornecedor_codigo_erp,
+                   quantidade_caixas, preco_caixa) DO UPDATE
+        SET produto_descricao = coalesce(EXCLUDED.produto_descricao, historico_compras.produto_descricao),
+            produto_id = coalesce(EXCLUDED.produto_id, historico_compras.produto_id),
+            fornecedor_nome = coalesce(EXCLUDED.fornecedor_nome, historico_compras.fornecedor_nome),
+            fornecedor_id = coalesce(EXCLUDED.fornecedor_id, historico_compras.fornecedor_id),
+            kg_caixa = EXCLUDED.kg_caixa,
+            total_kg = EXCLUDED.total_kg,
+            preco_kg = EXCLUDED.preco_kg,
+            aliquota_icms = EXCLUDED.aliquota_icms,
+            aliquota_pis_cofins = EXCLUDED.aliquota_pis_cofins,
+            aliquota_icms_reduzida = EXCLUDED.aliquota_icms_reduzida,
+            tipo = EXCLUDED.tipo,
+            importacao_id = EXCLUDED.importacao_id,
+            updated_at = now()
+      RETURNING (xmax = 0) AS inserido`, [JSON.stringify(compras)]);
+    for (const r of rows) {
+      if (r.inserido) saida.criados += 1; else saida.atualizados += 1;
+    }
+
+    // Compras antigas cujo produto ou fornecedor foi cadastrado depois.
+    await cliente.query(`
+      UPDATE historico_compras h SET fornecedor_id = f.id
+        FROM fornecedores f
+       WHERE h.fornecedor_id IS NULL AND f.codigo_erp = h.fornecedor_codigo_erp
+         AND f.deleted_at IS NULL`);
+    await cliente.query(`
+      UPDATE historico_compras h SET produto_id = p.id
+        FROM produtos p
+       WHERE h.produto_id IS NULL AND upper(p.codigo) = h.produto_codigo
+         AND p.deleted_at IS NULL`);
+
+    await cliente.query('COMMIT');
+  } catch (erro) {
+    await cliente.query('ROLLBACK');
+    throw erro;
+  } finally {
+    cliente.release();
+  }
+  return saida;
+};
+
 registrarGravador('vendas', gravarVendas);
 registrarGravador('produtos', gravarProdutos);
 registrarGravador('fornecedores', gravarFornecedores);
 registrarGravador('produto_fornecedor', gravarPrecos);
 registrarGravador('estoque', gravarEstoque);
+registrarGravador('historico_compras', gravarHistoricoCompras);
 
 export { gravarVendas, gravarProdutos, gravarFornecedores, gravarPrecos, gravarEstoque };

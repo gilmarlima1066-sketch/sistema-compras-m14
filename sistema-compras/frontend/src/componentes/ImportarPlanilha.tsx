@@ -182,6 +182,50 @@ export const CONFIG_FORNECEDORES: ConfigImportacao = {
   },
 };
 
+export const CONFIG_HISTORICO_COMPRAS: ConfigImportacao = {
+  entidade: 'historico_compras',
+  template: 'HISTORICO_COMPRAS',
+  botao: 'Importar compras',
+  titulo: 'Importar historico de compras (entradas do ERP)',
+  colunasUsadas: ['DTALMOXARIFADO', 'PC', 'COD', 'DESC', 'KG_CX', 'QTD_CX', 'TOTAL_KG', 'PRECO_CX',
+    'PRECO_KG', 'ALIQUOTAICMS', 'ALIQUOTA', 'ALIQ_PIS_COFINS', 'ALIQ_ICMS_RED', 'ALIQ_ICMS', 'TIPO',
+    'PARCEIRO_ID', 'PARCEIRO_NOME'],
+  obrigatorias: ['DTALMOXARIFADO', 'PC', 'COD', 'QTD_CX', 'PARCEIRO_ID'],
+  instrucao: 'Selecione o relatorio de entradas do ERP (custo e imposto), com as colunas '
+    + 'DTALMOXARIFADO, PC, COD, DESC, KG_CX, QTD_CX, TOTAL_KG, PRECO_CX, PRECO_KG, ALIQUOTAICMS, '
+    + 'ALIQ_PIS_COFINS, ALIQ_ICMS_RED, TIPO, PARCEIRO_ID e PARCEIRO_NOME. Nada e gravado antes da '
+    + 'sua confirmacao.',
+  aviso: 'PARCEIRO_ID e o ID do ERP da base de fornecedores. Importar o mesmo periodo de novo '
+    + 'atualiza as entradas em vez de duplicar. Compra de produto ou fornecedor ainda sem cadastro '
+    + 'e guardada pelo codigo e ligada quando o cadastro chegar.',
+  sucesso: 'Historico atualizado. Pesquise um produto ou um fornecedor para ver as ultimas compras.',
+  contadores: ['Entradas novas', 'Entradas atualizadas', 'Repetidas no arquivo', 'Rejeitadas'],
+  notaDescartadas: 'Mesmo PC, produto, data, quantidade e preco',
+  resumir: (p) => {
+    const iPc = idx(p, 'PC');
+    const iCod = idx(p, 'COD');
+    const iParc = idx(p, 'PARCEIRO_ID');
+    const iQtd = idx(p, 'QTD_CX');
+    const iPreco = idx(p, 'PRECO_CX');
+    const pedidos = new Set<string>();
+    const produtos = new Set<string>();
+    const parceiros = new Set<string>();
+    let valor = 0;
+    for (const l of p.linhas) {
+      pedidos.add(String(l[iPc]));
+      produtos.add(String(l[iCod]));
+      parceiros.add(String(l[iParc]));
+      valor += num(l[iQtd]) * num(l[iPreco]);
+    }
+    return [
+      { rotulo: 'Pedidos (PC)', valor: numero(pedidos.size), nota: `${numero(p.linhas.length)} itens` },
+      { rotulo: 'Produtos', valor: numero(produtos.size) },
+      { rotulo: 'Fornecedores', valor: numero(parceiros.size) },
+      { rotulo: 'Valor das entradas', valor: `R$ ${numero(valor)}`, nota: 'caixas x preco por caixa' },
+    ];
+  },
+};
+
 type Etapa = 'escolher' | 'lendo' | 'conferir' | 'gravando' | 'atualizando' | 'concluido';
 
 interface Conferencia {

@@ -192,8 +192,8 @@ export function data(valor: unknown, opcoes: {
 
   // Serial do Excel: dias desde 1899-12-30 (o "30" absorve o bug do ano
   // bissexto de 1900 que o formato carrega desde o Lotus 1-2-3).
-  if (typeof valor === 'number' || /^\d{5}(\.\d+)?$/.test(String(valor).trim())) {
-    const serial = Number(valor);
+  if (typeof valor === 'number' || /^\d{5}([.,]\d+)?$/.test(String(valor).trim())) {
+    const serial = Number(String(valor).trim().replace(',', '.'));
     if (serial > 0 && serial < 80000) {
       const base = Date.UTC(1899, 11, 30);
       const d = new Date(base + Math.floor(serial) * 86400000);

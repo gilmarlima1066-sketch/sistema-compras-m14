@@ -12,6 +12,7 @@ import * as visoes from './visoes.service.js';
 import * as simulacao from './simulacao.service.js';
 import * as requisicao from './requisicao.service.js';
 import * as painel from './painel.service.js';
+import * as historico from './historico.service.js';
 import {
   ajustarNecessidadeSchema, alcadaSchema, calendarioComprasSchema,
   compararSimulacoesSchema, criarRequisicaoSchema, decidirNecessidadeSchema,
@@ -37,6 +38,39 @@ const contexto = (req: { usuario?: { id: number }; ip?: string }) => ({
 
 const idParam = z.object({ id: z.coerce.number().int().positive() });
 const planejamentoQuery = z.object({ planejamento_id: z.coerce.number().int().positive().optional() });
+
+// --- Historico de compras (entradas importadas do ERP) -----------------------
+
+const codigoParam = z.object({ codigo: z.string().trim().min(1).max(40) });
+
+planejamentoRouter.get('/historico/resumo', LER, rota(async (_req, res) =>
+  ok(res, await historico.resumo(), 'Resumo do historico de compras')));
+
+planejamentoRouter.get('/historico/busca', LER, rota(async (req, res) => {
+  const { q } = validar(req, 'query', z.object({ q: z.string().trim().min(1).max(80) }));
+  return ok(res, await historico.buscar(q), 'Busca no historico de compras');
+}));
+
+planejamentoRouter.get('/historico/produto/:codigo', LER, rota(async (req, res) => {
+  const { codigo } = validar(req, 'params', codigoParam);
+  return ok(res, await historico.porProduto(codigo), 'Fornecedores que ja venderam o produto');
+}));
+
+planejamentoRouter.get('/historico/fornecedor/:codigo', LER, rota(async (req, res) => {
+  const { codigo } = validar(req, 'params', codigoParam);
+  return ok(res, await historico.porFornecedor(codigo), 'Produtos que o fornecedor ja vendeu');
+}));
+
+planejamentoRouter.get('/historico/itens', LER, rota(async (req, res) => {
+  const filtro = validar(req, 'query', z.object({
+    produto: z.string().trim().max(40).optional(),
+    fornecedor: z.string().trim().max(40).optional(),
+    pagina: z.coerce.number().int().min(1).default(1),
+    limite: z.coerce.number().int().min(1).max(200).default(50),
+  }));
+  const { itens, meta } = await historico.itens(filtro);
+  return ok(res, itens, 'Entradas do historico de compras', meta);
+}));
 
 // --- Painel de gestao de compras (a aba principal da planilha) ---------------
 

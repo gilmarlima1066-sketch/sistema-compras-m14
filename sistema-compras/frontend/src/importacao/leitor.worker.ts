@@ -40,17 +40,22 @@ function lerPastaDeTrabalho(bytes: Uint8Array): XLSX.WorkBook {
 }
 
 /**
- * O texto formatado de um numero inteiro longo em formato "Geral" e notacao
- * cientifica: o CNPJ 9519473000174 vira "9,51947E+12" e o codigo de barras
- * 7898663866223 vira "7,89866E+12" - digitos perdidos. Para esses o valor
- * verdadeiro da celula e o que vale.
+ * Numero de celula vai para o servidor como o VALOR, nao como o texto que o
+ * formato da celula desenha. O texto formatado engana:
+ *   - inteiro longo em "Geral" vira notacao cientifica: o CNPJ 9519473000174
+ *     sai "9,51947E+12" e o codigo de barras perde digitos;
+ *   - "#,##0" desenha 3000 como "3,000", que o leitor brasileiro le como 3;
+ *   - "0.000" desenha 0,125 como "0.125", que parece milhar (125).
+ * O valor sai com virgula decimal ("0,125", "3000", "37,5"): o formato que
+ * o normalizador do servidor le sem ambiguidade. Datas ficam como estao.
  */
-function preservarInteirosLongos(planilha: XLSX.WorkSheet) {
+function valoresNumericos(planilha: XLSX.WorkSheet) {
   const corrigir = (celula: XLSX.CellObject | undefined) => {
-    if (celula?.t === 'n' && typeof celula.v === 'number' && Number.isInteger(celula.v)
-        && Math.abs(celula.v) >= 1e10 && (!celula.z || celula.z === 'General')) {
-      celula.w = String(celula.v);
-    }
+    if (celula?.t !== 'n' || typeof celula.v !== 'number' || !Number.isFinite(celula.v)) return;
+    if (celula.z && celula.z !== 'General' && XLSX.SSF.is_date(celula.z)) return;
+    const texto = String(celula.v);
+    if (/e/i.test(texto)) return;
+    celula.w = texto.replace('.', ',');
   };
   // Modo denso: a 0.18 guarda as linhas na propria folha; versoes novas em "!data".
   type Linhas = Array<Array<XLSX.CellObject | undefined> | undefined>;
@@ -75,7 +80,7 @@ self.onmessage = async (evento: MessageEvent<{ arquivo: File }>) => {
     const planilha = livro.SheetNames.length ? livro.Sheets[livro.SheetNames[0]!] : undefined;
     if (!planilha) throw new Error('O arquivo nao contem planilhas validas');
 
-    preservarInteirosLongos(planilha);
+    valoresNumericos(planilha);
     enviar({ tipo: 'progresso', etapa: 'Separando as linhas...' });
     const matriz = XLSX.utils.sheet_to_json<unknown[]>(planilha, {
       header: 1, defval: '', raw: false, dateNF: 'DD/MM/YYYY', blankrows: false,
