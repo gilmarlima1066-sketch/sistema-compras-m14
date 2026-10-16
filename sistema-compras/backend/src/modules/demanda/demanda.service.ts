@@ -319,6 +319,9 @@ export async function listarVendas(
 
 const ORDENAVEIS: Record<string, string> = {
   quantidade: 'quantidade',
+  industrializada: 'quantidade_industrializada',
+  total: 'quantidade_total',
+  kg: 'kg_total',
   valor: 'valor',
   media_diaria: 'media_diaria',
   variacao: 'variacao_percentual',
@@ -342,6 +345,10 @@ export async function analisarDemanda(filtro: FiltroPeriodo & Paginacao) {
   const colunaOrdem = ORDENAVEIS[filtro.ordenar_por ?? ''] ?? 'quantidade';
   const direcao = filtro.ordem === 'asc' ? 'ASC' : 'DESC';
 
+  // Industrializado (fracionado) tambem e saida: entra no total ao lado da
+  // venda. So a situacao OK conta, como na aba de industrializados.
+  // O peso vem do cadastro; sem ele, do PESOLIQ do ultimo fracionado, do
+  // KG_CX da ultima compra (valores do proprio ERP) e, por ultimo, da descricao.
   const sql = `
     WITH atual AS (
       SELECT d.produto_id, sum(d.quantidade) AS quantidade, sum(d.valor) AS valor,
@@ -351,6 +358,13 @@ export async function analisarDemanda(filtro: FiltroPeriodo & Paginacao) {
        WHERE d.data_venda BETWEEN $1 AND $2 ${onde}
        GROUP BY d.produto_id
     ),
+    industrializado AS (
+      SELECT h.produto_id, sum(h.quantidade) AS quantidade
+        FROM historico_industrializacao h
+        JOIN produtos p ON p.id = h.produto_id AND p.deleted_at IS NULL
+       WHERE h.situacao = 'OK' AND h.data_inclusao BETWEEN $1 AND $2 ${onde}
+       GROUP BY h.produto_id
+    ),
     anterior AS (
       SELECT d.produto_id, sum(d.quantidade) AS quantidade
         FROM mv_demanda_diaria d
@@ -358,20 +372,57 @@ export async function analisarDemanda(filtro: FiltroPeriodo & Paginacao) {
        WHERE d.data_venda BETWEEN $3 AND $4 ${onde}
        GROUP BY d.produto_id
     ),
+    base AS (
+      SELECT coalesce(a.produto_id, i.produto_id) AS produto_id,
+             coalesce(a.quantidade, 0) AS quantidade, coalesce(a.valor, 0) AS valor,
+             coalesce(a.dias_com_venda, 0) AS dias_com_venda,
+             coalesce(i.quantidade, 0) AS quantidade_industrializada
+        FROM atual a FULL JOIN industrializado i ON i.produto_id = a.produto_id
+    ),
     consolidado AS (
-      SELECT p.id AS produto_id, p.codigo, p.descricao, p.peso,
+      SELECT p.id AS produto_id, p.codigo, p.descricao,
              p.classificacao_abc, p.classificacao_xyz, c.nome AS categoria,
-             a.quantidade, a.valor, a.dias_com_venda,
-             a.quantidade / ${periodo.dias}::numeric                AS media_diaria,
-             a.quantidade / ${periodo.dias}::numeric * 7            AS media_semanal,
-             a.quantidade / ${periodo.dias}::numeric * 30           AS media_mensal,
+             b.quantidade, b.valor, b.dias_com_venda,
+             b.quantidade_industrializada,
+             b.quantidade + b.quantidade_industrializada            AS quantidade_total,
+             pk.peso_kg, pk.origem_peso,
+             (b.quantidade + b.quantidade_industrializada) * pk.peso_kg AS kg_total,
+             b.quantidade / ${periodo.dias}::numeric                AS media_diaria,
+             b.quantidade / ${periodo.dias}::numeric * 7            AS media_semanal,
+             b.quantidade / ${periodo.dias}::numeric * 30           AS media_mensal,
              coalesce(ant.quantidade, 0)                            AS quantidade_anterior,
              CASE WHEN coalesce(ant.quantidade, 0) > 0
-                  THEN (a.quantidade - ant.quantidade) / ant.quantidade * 100 END AS variacao_percentual
-        FROM atual a
-        JOIN produtos p  ON p.id = a.produto_id
+                  THEN (b.quantidade - ant.quantidade) / ant.quantidade * 100 END AS variacao_percentual
+        FROM base b
+        JOIN produtos p  ON p.id = b.produto_id
         JOIN categorias c ON c.id = p.categoria_id
-        LEFT JOIN anterior ant ON ant.produto_id = a.produto_id
+        LEFT JOIN anterior ant ON ant.produto_id = b.produto_id
+        CROSS JOIN LATERAL (
+          SELECT CASE WHEN p.peso > 0 THEN p.peso
+                      WHEN fr.peso > 0 THEN fr.peso
+                      WHEN co.peso > 0 THEN co.peso
+                      ELSE ds.peso END AS peso_kg,
+                 CASE WHEN p.peso > 0 THEN 'cadastro'
+                      WHEN fr.peso > 0 THEN 'fracionado'
+                      WHEN co.peso > 0 THEN 'compra'
+                      WHEN ds.peso > 0 THEN 'descricao' END AS origem_peso
+            FROM (SELECT 1) um
+            -- Ultimo recurso: "TAPIOCA GRANULADA 5KG". So com um unico "NNKG"
+            -- e sem embalagem multipla ("10X1KG", "2 PCT X 2,5KG").
+            LEFT JOIN LATERAL (
+              SELECT replace((regexp_match(p.descricao, '(\\d+(?:[.,]\\d+)?)\\s*KG', 'i'))[1], ',', '.')::numeric AS peso
+               WHERE p.descricao !~* '(^|[^A-Z])X\\s*\\d'
+                 AND (SELECT count(*) FROM regexp_matches(p.descricao, '\\d+(?:[.,]\\d+)?\\s*KG', 'gi')) = 1
+            ) ds ON true
+            LEFT JOIN LATERAL (
+              SELECT h.peso_liquido AS peso FROM historico_industrializacao h
+               WHERE h.produto_id = p.id AND h.peso_liquido > 0
+               ORDER BY h.data_inclusao DESC, h.id DESC LIMIT 1) fr ON true
+            LEFT JOIN LATERAL (
+              SELECT hc.kg_caixa AS peso FROM historico_compras hc
+               WHERE hc.produto_id = p.id AND hc.kg_caixa > 0
+               ORDER BY hc.data_entrada DESC, hc.id DESC LIMIT 1) co ON true
+        ) pk
     )
     SELECT * FROM consolidado`;
 

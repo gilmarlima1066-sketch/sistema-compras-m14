@@ -866,7 +866,17 @@ interface LinhaAnalise {
   quantidade: number; valor: number; dias_com_venda: number;
   media_diaria: number; media_semanal: number; media_mensal: number;
   quantidade_anterior: number; variacao_percentual: number | null;
+  quantidade_industrializada: number; quantidade_total: number;
+  peso_kg: number | null; origem_peso: 'cadastro' | 'fracionado' | 'compra' | 'descricao' | null;
+  kg_total: number | null;
 }
+
+const ORIGEM_PESO: Record<string, string> = {
+  cadastro: 'do cadastro do produto',
+  fracionado: 'do PESOLIQ do ultimo fracionado',
+  compra: 'do KG_CX da ultima compra',
+  descricao: 'lido da descricao (confira e preencha o peso no cadastro)',
+};
 
 function PainelAnalise({ periodo, setPeriodo }: { periodo: Periodo; setPeriodo: (p: Periodo) => void }) {
   const [busca, setBusca] = useState('');
@@ -889,7 +899,10 @@ function PainelAnalise({ periodo, setPeriodo }: { periodo: Periodo; setPeriodo: 
             <Selecao
               rotulo="Ordenar por" valor={ordenar} aoMudar={setOrdenar} vazio={null}
               opcoes={[
-                { valor: 'quantidade', texto: 'Quantidade' },
+                { valor: 'quantidade', texto: 'Qtd vendida' },
+                { valor: 'industrializada', texto: 'Qtd industrializada' },
+                { valor: 'total', texto: 'Qtd total' },
+                { valor: 'kg', texto: 'Total em kg' },
                 { valor: 'valor', texto: 'Faturamento' },
                 { valor: 'variacao', texto: 'Variacao' },
               ]}
@@ -900,7 +913,7 @@ function PainelAnalise({ periodo, setPeriodo }: { periodo: Periodo; setPeriodo: 
       >
         {erro && <Aviso>{erro}</Aviso>}
         {carregando && <Vazio>Carregando…</Vazio>}
-        {!carregando && !itens.length && <Vazio>Nenhum produto com venda no periodo.</Vazio>}
+        {!carregando && !itens.length && <Vazio>Nenhum produto com venda ou industrializacao no periodo.</Vazio>}
         {!!itens.length && (
           <div className="tabela-rolagem">
             <table className="tabela">
@@ -908,7 +921,11 @@ function PainelAnalise({ periodo, setPeriodo }: { periodo: Periodo; setPeriodo: 
                 <tr>
                   <th>Codigo</th><th>Produto</th><th>Categoria</th>
                   <th>ABC</th><th>XYZ</th>
-                  <th className="num">Qtd</th><th className="num">Valor</th>
+                  <th className="num">Qtd</th>
+                  <th className="num" title="Saida para industrializacao (fracionados), situacao OK">Qtd industr.</th>
+                  <th className="num" title="Vendida + industrializada">Qtd total</th>
+                  <th className="num" title="Qtd total x peso do produto">Total kg</th>
+                  <th className="num">Valor</th>
                   <th className="num">Media/dia</th><th className="num">Media/mes</th>
                   <th className="num">Dias c/ venda</th><th>Variacao</th>
                 </tr>
@@ -927,6 +944,13 @@ function PainelAnalise({ periodo, setPeriodo }: { periodo: Periodo; setPeriodo: 
                     <td>{l.classificacao_abc ? <Etiqueta texto={l.classificacao_abc} /> : '—'}</td>
                     <td>{l.classificacao_xyz ? <Etiqueta texto={l.classificacao_xyz} /> : '—'}</td>
                     <td className="num">{numero(l.quantidade)}</td>
+                    <td className={`num${Number(l.quantidade_industrializada) ? '' : ' fraco'}`}>{numero(l.quantidade_industrializada)}</td>
+                    <td className="num"><strong>{numero(l.quantidade_total)}</strong></td>
+                    <td className="num"
+                      title={l.peso_kg ? `${numero(l.peso_kg, 2)} kg por unidade, ${ORIGEM_PESO[l.origem_peso ?? ''] ?? ''}`
+                        : 'Sem peso: preencha o peso no cadastro do produto'}>
+                      {l.kg_total !== null ? numero(l.kg_total) : <span className="fraco">sem peso</span>}
+                    </td>
                     <td className="num">{moeda(l.valor)}</td>
                     <td className="num">{numero(l.media_diaria, 2)}</td>
                     <td className="num">{numero(l.media_mensal, 1)}</td>
