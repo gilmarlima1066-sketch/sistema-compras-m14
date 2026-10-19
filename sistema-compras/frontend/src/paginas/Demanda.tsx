@@ -926,7 +926,8 @@ function PainelAnalise({ periodo, setPeriodo }: { periodo: Periodo; setPeriodo: 
                   <th className="num" title="Vendida + industrializada">Qtd total</th>
                   <th className="num" title="Qtd total x peso do produto">Total kg</th>
                   <th className="num">Valor</th>
-                  <th className="num">Media/dia</th><th className="num">Media/mes</th>
+                  <th className="num" title="Qtd total (vendida + industrializada) / dias do periodo">Media/dia</th>
+                  <th className="num" title="Media/dia x 30">Media/mes</th>
                   <th className="num">Dias c/ venda</th><th>Variacao</th>
                 </tr>
               </thead>

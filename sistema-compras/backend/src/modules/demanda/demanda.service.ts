@@ -387,9 +387,11 @@ export async function analisarDemanda(filtro: FiltroPeriodo & Paginacao) {
              b.quantidade + b.quantidade_industrializada            AS quantidade_total,
              pk.peso_kg, pk.origem_peso,
              (b.quantidade + b.quantidade_industrializada) * pk.peso_kg AS kg_total,
-             b.quantidade / ${periodo.dias}::numeric                AS media_diaria,
-             b.quantidade / ${periodo.dias}::numeric * 7            AS media_semanal,
-             b.quantidade / ${periodo.dias}::numeric * 30           AS media_mensal,
+             -- Medias sobre a saida total (venda + industrializado): e o que
+             -- de fato sai da prateleira e precisa ser reposto.
+             (b.quantidade + b.quantidade_industrializada) / ${periodo.dias}::numeric      AS media_diaria,
+             (b.quantidade + b.quantidade_industrializada) / ${periodo.dias}::numeric * 7  AS media_semanal,
+             (b.quantidade + b.quantidade_industrializada) / ${periodo.dias}::numeric * 30 AS media_mensal,
              coalesce(ant.quantidade, 0)                            AS quantidade_anterior,
              CASE WHEN coalesce(ant.quantidade, 0) > 0
                   THEN (b.quantidade - ant.quantidade) / ant.quantidade * 100 END AS variacao_percentual
