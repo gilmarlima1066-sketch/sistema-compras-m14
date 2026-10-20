@@ -65,10 +65,12 @@ uteis AS (
 fator AS (
   SELECT sum(dias_uteis)::numeric / nullif(sum(dias_corridos), 0) AS uteis_por_corrido FROM uteis
 ),
+-- Consumo = venda + industrializado (vw_saida_diaria): o fracionado tambem
+-- tira produto da prateleira e entra na cobertura e na sugestao.
 mensal AS (
   SELECT d.produto_id, u.mes, sum(d.quantidade) / nullif(u.dias_uteis, 0) AS por_dia_util
-    FROM mv_demanda_diaria d
-    JOIN uteis u ON d.data_venda BETWEEN u.mes AND u.ate
+    FROM vw_saida_diaria d
+    JOIN uteis u ON d.data BETWEEN u.mes AND u.ate
    GROUP BY d.produto_id, u.mes, u.dias_uteis
   HAVING sum(d.quantidade) > 0
 ),
@@ -78,8 +80,8 @@ media_planilha AS (
 ),
 media_sistema AS (
   SELECT d.produto_id, sum(d.quantidade) / 90.0 AS por_dia
-    FROM mv_demanda_diaria d, ref r
-   WHERE d.data_venda > r.fim - 90 AND d.data_venda <= r.fim
+    FROM vw_saida_diaria d, ref r
+   WHERE d.data > r.fim - 90 AND d.data <= r.fim
    GROUP BY d.produto_id
 ),
 saldo AS (

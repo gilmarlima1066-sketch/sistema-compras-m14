@@ -365,11 +365,12 @@ export async function analisarDemanda(filtro: FiltroPeriodo & Paginacao) {
        WHERE h.situacao = 'OK' AND h.data_inclusao BETWEEN $1 AND $2 ${onde}
        GROUP BY h.produto_id
     ),
+    -- Base da variacao: a saida total (venda + industrializado) do periodo anterior.
     anterior AS (
       SELECT d.produto_id, sum(d.quantidade) AS quantidade
-        FROM mv_demanda_diaria d
+        FROM vw_saida_diaria d
         JOIN produtos p ON p.id = d.produto_id AND p.deleted_at IS NULL
-       WHERE d.data_venda BETWEEN $3 AND $4 ${onde}
+       WHERE d.data BETWEEN $3 AND $4 ${onde}
        GROUP BY d.produto_id
     ),
     base AS (
@@ -394,7 +395,8 @@ export async function analisarDemanda(filtro: FiltroPeriodo & Paginacao) {
              (b.quantidade + b.quantidade_industrializada) / ${periodo.dias}::numeric * 30 AS media_mensal,
              coalesce(ant.quantidade, 0)                            AS quantidade_anterior,
              CASE WHEN coalesce(ant.quantidade, 0) > 0
-                  THEN (b.quantidade - ant.quantidade) / ant.quantidade * 100 END AS variacao_percentual
+                  THEN (b.quantidade + b.quantidade_industrializada - ant.quantidade)
+                       / ant.quantidade * 100 END AS variacao_percentual
         FROM base b
         JOIN produtos p  ON p.id = b.produto_id
         JOIN categorias c ON c.id = p.categoria_id
@@ -463,13 +465,24 @@ export async function detalharProduto(produtoId: number, filtro: FiltroPeriodo) 
   if (!produto.rows.length) throw naoEncontrado('Produto');
 
   const [serieDiaria, serieMensal, estoque, previsao, sazonalidade, fornecedor, reprimida] = await Promise.all([
-    query(`SELECT data_venda, quantidade, valor, documentos
-             FROM mv_demanda_diaria
-            WHERE produto_id = $1 AND data_venda BETWEEN $2 AND $3
-            ORDER BY data_venda`, [produtoId, periodo.inicio, periodo.fim]),
-    query(`SELECT mes, quantidade, valor, dias_com_venda
-             FROM mv_demanda_mensal
-            WHERE produto_id = $1 ORDER BY mes`, [produtoId]),
+    // Quantidade = saida total (venda + industrializado); valor e documentos
+    // continuam sendo so da venda.
+    query(`SELECT s.data::text AS data_venda, s.quantidade, s.quantidade_venda,
+                  s.quantidade_industrializada,
+                  coalesce(d.valor, 0) AS valor, coalesce(d.documentos, 0) AS documentos
+             FROM vw_saida_diaria s
+             LEFT JOIN mv_demanda_diaria d ON d.produto_id = s.produto_id AND d.data_venda = s.data
+            WHERE s.produto_id = $1 AND s.data BETWEEN $2 AND $3
+            ORDER BY s.data`, [produtoId, periodo.inicio, periodo.fim]),
+    query(`SELECT date_trunc('month', s.data)::date AS mes,
+                  sum(s.quantidade) AS quantidade, sum(s.quantidade_venda) AS quantidade_venda,
+                  sum(s.quantidade_industrializada) AS quantidade_industrializada,
+                  coalesce(max(m.valor), 0) AS valor, coalesce(max(m.dias_com_venda), 0) AS dias_com_venda
+             FROM vw_saida_diaria s
+             LEFT JOIN mv_demanda_mensal m
+                    ON m.produto_id = s.produto_id AND m.mes = date_trunc('month', s.data)::date
+            WHERE s.produto_id = $1
+            GROUP BY 1 ORDER BY 1`, [produtoId]),
     query(`SELECT coalesce(sum(quantidade_fisica), 0)      AS estoque_fisico,
                   coalesce(sum(quantidade_disponivel), 0)  AS estoque_disponivel,
                   coalesce(sum(quantidade_reservada), 0)   AS estoque_reservado,
@@ -491,6 +504,7 @@ export async function detalharProduto(produtoId: number, filtro: FiltroPeriodo) 
   ]);
 
   const quantidade = serieDiaria.rows.reduce((a, r) => a + Number(r.quantidade), 0);
+  const quantidadeVenda = serieDiaria.rows.reduce((a, r) => a + Number(r.quantidade_venda), 0);
   const est = estoque.rows[0] as Record<string, number> | undefined;
   const disponivel = Number(est?.estoque_disponivel ?? 0);
   const mediaDiaria = quantidade / periodo.dias;
@@ -500,8 +514,10 @@ export async function detalharProduto(produtoId: number, filtro: FiltroPeriodo) 
     periodo,
     resumo: {
       quantidade,
+      quantidade_venda: quantidadeVenda,
+      quantidade_industrializada: quantidade - quantidadeVenda,
       valor: serieDiaria.rows.reduce((a, r) => a + Number(r.valor), 0),
-      dias_com_venda: serieDiaria.rows.length,
+      dias_com_venda: serieDiaria.rows.filter((r) => Number(r.quantidade_venda) > 0).length,
       media_diaria: mediaDiaria,
       media_mensal: mediaDiaria * 30,
       cobertura_dias: mediaDiaria > 0 ? disponivel / mediaDiaria : null,

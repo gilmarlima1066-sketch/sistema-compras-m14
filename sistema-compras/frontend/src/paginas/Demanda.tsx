@@ -928,7 +928,8 @@ function PainelAnalise({ periodo, setPeriodo }: { periodo: Periodo; setPeriodo: 
                   <th className="num">Valor</th>
                   <th className="num" title="Qtd total (vendida + industrializada) / dias do periodo">Media/dia</th>
                   <th className="num" title="Media/dia x 30">Media/mes</th>
-                  <th className="num">Dias c/ venda</th><th>Variacao</th>
+                  <th className="num">Dias c/ venda</th>
+                  <th title="Qtd total (venda + industrializado) contra o periodo anterior">Variacao</th>
                 </tr>
               </thead>
               <tbody>
@@ -974,7 +975,10 @@ function PainelAnalise({ periodo, setPeriodo }: { periodo: Periodo; setPeriodo: 
 interface DetalheProduto {
   produto: Record<string, any>;
   periodo: { inicio: string; fim: string; dias: number };
-  resumo: { quantidade: number; valor: number; dias_com_venda: number; media_diaria: number; media_mensal: number; cobertura_dias: number | null };
+  resumo: {
+    quantidade: number; quantidade_venda: number; quantidade_industrializada: number; valor: number;
+    dias_com_venda: number; media_diaria: number; media_mensal: number; cobertura_dias: number | null;
+  };
   estoque: Record<string, number> | null;
   serie_mensal: Array<{ mes: string; quantidade: number; valor: number }>;
   previsao: Record<string, any> | null;
@@ -1000,9 +1004,10 @@ function ModalProduto({ produtoId, aoFechar }: { produtoId: number; aoFechar: ()
       {d && (
         <>
           <div className="grade-indicadores">
-            <Indicador rotulo="Quantidade 365d" valor={numero(d.resumo.quantidade)} />
+            <Indicador rotulo="Saida 365d" valor={numero(d.resumo.quantidade)}
+              nota={`${numero(d.resumo.quantidade_venda)} vendidas + ${numero(d.resumo.quantidade_industrializada)} industrializadas`} />
             <Indicador rotulo="Faturamento 365d" valor={moeda(d.resumo.valor)} />
-            <Indicador rotulo="Media diaria" valor={numero(d.resumo.media_diaria, 2)} />
+            <Indicador rotulo="Media diaria" valor={numero(d.resumo.media_diaria, 2)} nota="venda + industrializado" />
             <Indicador rotulo="Estoque disponivel" valor={numero(d.estoque?.estoque_disponivel ?? 0)} />
             <Indicador
               rotulo="Cobertura"
@@ -1013,7 +1018,7 @@ function ModalProduto({ produtoId, aoFechar }: { produtoId: number; aoFechar: ()
           </div>
 
           {d.serie_mensal.length > 0 && (
-            <Cartao titulo="Demanda mensal">
+            <Cartao titulo="Saida mensal (venda + industrializado)">
               <GraficoLinha
                 rotulos={d.serie_mensal.map((m) => {
                   const dt = new Date(m.mes);

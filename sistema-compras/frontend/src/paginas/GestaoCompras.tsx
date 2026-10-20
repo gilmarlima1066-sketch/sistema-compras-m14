@@ -286,10 +286,10 @@ function Painel() {
                       <th>Situacao</th>
                       <th>Curva</th>
                       <th className="dir">Estoque</th>
-                      <th className="dir" title="Media dos ultimos 7 meses com venda, por dia util">
-                        Venda/dia util
+                      <th className="dir" title="Venda + industrializado: media dos ultimos 7 meses com saida, por dia util">
+                        Saida/dia util
                       </th>
-                      <th className="dir" title="Media dos ultimos 90 dias corridos">Venda/dia 90d</th>
+                      <th className="dir" title="Venda + industrializado: media dos ultimos 90 dias corridos">Saida/dia 90d</th>
                       <th className="dir">Cobertura</th>
                       <th className="dir">Shelf life</th>
                       <th className="dir">Est. min</th>
@@ -403,12 +403,12 @@ function MemoriaCalculo({ linha: l, metodo, aoFechar }: {
           {numero(l.demanda_dia, 2)} por dia corrido
           {metodo === 'PLANILHA' ? (
             <div className="fraco">
-              Media da planilha: {l.venda_dia_util_planilha === null ? 'sem venda'
+              Media da planilha: {l.venda_dia_util_planilha === null ? 'sem saida'
                 : `${numero(l.venda_dia_util_planilha, 2)} por dia util`} em {l.meses_com_venda} mes(es)
-              com venda dos ultimos 7, convertida para dia corrido
+              com saida (venda + industrializado) dos ultimos 7, convertida para dia corrido
             </div>
           ) : (
-            <div className="fraco">Media do sistema: vendas dos ultimos 90 dias ÷ 90</div>
+            <div className="fraco">Media do sistema: venda + industrializado dos ultimos 90 dias ÷ 90</div>
           )}
           <div className="fraco">
             Comparacao: planilha {l.venda_dia_planilha === null ? '—' : numero(l.venda_dia_planilha, 2)}/dia ·

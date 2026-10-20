@@ -12,13 +12,13 @@ type Faixa = 'ZERADO' | 'CRITICO' | 'ATENCAO' | 'ADEQUADO' | 'EXCESSO' | 'SEM_GI
 
 /** Ordem, nome e regra de cada faixa. A regra usa o lead time e o minimo de cada produto. */
 const FAIXAS: Array<{ id: Faixa; nome: string; regra: string; cor: string }> = [
-  { id: 'ZERADO', nome: 'Sem estoque', regra: 'vende e nao tem saldo', cor: 'var(--faixa-zerado)' },
+  { id: 'ZERADO', nome: 'Sem estoque', regra: 'tem saida e nao tem saldo', cor: 'var(--faixa-zerado)' },
   { id: 'CRITICO', nome: 'Critico', regra: 'acaba antes de uma compra chegar', cor: 'var(--faixa-critico)' },
   { id: 'ATENCAO', nome: 'Atencao', regra: 'abaixo do estoque minimo', cor: 'var(--faixa-atencao)' },
   { id: 'ADEQUADO', nome: 'Adequado', regra: 'cobre lead time e minimo', cor: 'var(--faixa-adequado)' },
   { id: 'EXCESSO', nome: 'Excesso', regra: 'mais dias do que o limite', cor: 'var(--faixa-excesso)' },
-  { id: 'SEM_GIRO', nome: 'Sem giro', regra: 'tem saldo e nao vendeu em 90 dias', cor: 'var(--faixa-sem-giro)' },
-  { id: 'SEM_MOVIMENTO', nome: 'Sem movimento', regra: 'sem saldo e sem venda', cor: 'var(--faixa-sem-movimento)' },
+  { id: 'SEM_GIRO', nome: 'Sem giro', regra: 'tem saldo e nao saiu em 90 dias', cor: 'var(--faixa-sem-giro)' },
+  { id: 'SEM_MOVIMENTO', nome: 'Sem movimento', regra: 'sem saldo e sem saida', cor: 'var(--faixa-sem-movimento)' },
 ];
 const FAIXA = Object.fromEntries(FAIXAS.map((f) => [f.id, f])) as Record<Faixa, (typeof FAIXAS)[number]>;
 
@@ -132,7 +132,7 @@ function Silo({ resumo, faixa, aoEscolher }: {
 function Regua({ l }: { l: LinhaCobertura }) {
   const cor = FAIXA[l.faixa].cor;
   if (l.cobertura_dias === null) {
-    return <span className="regua"><span className="fraco">{l.disponivel > 0 ? 'sem venda' : '—'}</span></span>;
+    return <span className="regua"><span className="fraco">{l.disponivel > 0 ? 'sem saida' : '—'}</span></span>;
   }
   const max = Math.max(l.excesso_dias * 1.2, l.lead_time_dias + l.estoque_minimo_dias + 10);
   const pct = (d: number) => `${(Math.min(d, max) / max) * 100}%`;
@@ -248,7 +248,7 @@ export function Estoque() {
     <>
       <CabecalhoPagina
         titulo="Estoque"
-        descricao="Quantos dias cada produto dura na venda real, e o que precisa de atencao."
+        descricao="Quantos dias cada produto dura no consumo real (venda + industrializado), e o que precisa de atencao."
         acoes={pode('estoque.movimentar') || pode('integracao.importar')
           ? <ImportarPlanilha config={CONFIG_ESTOQUE} aoConcluir={recarregar} />
           : undefined}
@@ -287,7 +287,7 @@ export function Estoque() {
                 <th>Produto</th>
                 <th>Curva</th>
                 <th className="dir">Disponivel</th>
-                <th className="dir">Venda por dia</th>
+                <th className="dir" title="Venda + industrializado, media dos ultimos 90 dias">Saida por dia</th>
                 <th>Cobertura</th>
                 <th className="dir">Em pedido</th>
                 <th className="dir">Valor</th>
@@ -362,7 +362,7 @@ export function Estoque() {
             </dd>
             <dt>Venda</dt>
             <dd>
-              {detalhe.produto.venda_dia ? `${numero(detalhe.produto.venda_dia, 1)} por dia nos ultimos 90 dias` : 'sem venda nos ultimos 90 dias'}
+              {detalhe.produto.venda_dia ? `${numero(detalhe.produto.venda_dia, 1)} por dia nos ultimos 90 dias (venda + industrializado)` : 'sem saida nos ultimos 90 dias'}
               {detalhe.produto.ultima_venda && `; ultima em ${data(detalhe.produto.ultima_venda)}`}
             </dd>
             <dt>Cobertura</dt>

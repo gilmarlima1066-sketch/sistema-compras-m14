@@ -1,5 +1,6 @@
 /**
- * Cobertura do estoque: quantos dias o saldo disponivel dura na venda real.
+ * Cobertura do estoque: quantos dias o saldo disponivel dura no consumo real
+ * (venda + industrializado).
  *
  * A visao antiga (vw_produtos_criticos) media a cobertura pela demanda
  * cadastrada em parametros_estoque - vazia para produto importado do ERP, o
@@ -16,10 +17,11 @@ const SQL = `
 WITH ref AS (
   SELECT coalesce((SELECT max(data_venda) FROM mv_demanda_diaria), CURRENT_DATE) AS fim
 ),
+-- Consumo = venda + industrializado: o fracionado tambem esvazia a prateleira.
 venda AS (
   SELECT d.produto_id, sum(d.quantidade) / 90.0 AS por_dia
-    FROM mv_demanda_diaria d, ref r
-   WHERE d.data_venda > r.fim - 90 AND d.data_venda <= r.fim
+    FROM vw_saida_diaria d, ref r
+   WHERE d.data > r.fim - 90 AND d.data <= r.fim
    GROUP BY d.produto_id
 ),
 ultima AS (
