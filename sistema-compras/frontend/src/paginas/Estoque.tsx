@@ -35,7 +35,7 @@ interface LinhaCobertura {
   curva: string | null; fisico: number; reservado: number; disponivel: number;
   em_pedido: number; chegada: string | null; venda_dia: number | null; ultima_venda: string | null;
   cobertura_dias: number | null; lead_time_dias: number; estoque_minimo_dias: number;
-  excesso_dias: number; custo: number | null; valor: number | null; faixa: Faixa;
+  excesso_dias: number; custo: number | null; valor: number | null; faixa: Faixa; ativo: boolean;
 }
 
 interface Resumo {
@@ -44,6 +44,7 @@ interface Resumo {
   valor_total: number;
   valor_parado: number;
   sem_custo: number;
+  inativos: number;
 }
 
 const TIPOS_MOVIMENTACAO = [
@@ -176,6 +177,11 @@ export function Estoque() {
   const [carregando, setCarregando] = useState(true);
   const [erro, setErro] = useState<string | null>(null);
   const [versao, setVersao] = useState(0);
+  const [situacao, setSituacao] = useState<'ativos' | 'inativos'>('ativos');
+  const [confirmarInativar, setConfirmarInativar] = useState(false);
+  const [aviso, setAviso] = useState<string | null>(null);
+  const [trocando, setTrocando] = useState<number | null>(null);
+  const podeEditar = pode('produtos.editar');
 
   const [detalhe, setDetalhe] = useState<{ produto: LinhaCobertura; dados: Detalhe } | null>(null);
   const [movimentando, setMovimentando] = useState<LinhaCobertura | null>(null);
@@ -192,14 +198,49 @@ export function Estoque() {
   useEffect(() => {
     setCarregando(true);
     api<{ linhas: LinhaCobertura[]; resumo: Resumo }>('/estoque/cobertura', {
-      query: { busca: buscaAplicada, faixa, curva, ordenar, pagina, limite: 50 },
+      query: { busca: buscaAplicada, faixa, curva, ordenar, situacao, pagina, limite: 50 },
     })
       .then((r) => { setDados(r.data); setMeta(r.meta); setErro(null); })
       .catch((e) => setErro(e instanceof ErroApi ? e.message : 'Nao foi possivel carregar o estoque'))
       .finally(() => setCarregando(false));
-  }, [buscaAplicada, faixa, curva, ordenar, pagina, versao]);
+  }, [buscaAplicada, faixa, curva, ordenar, situacao, pagina, versao]);
 
   const recarregar = () => setVersao((v) => v + 1);
+
+  async function inativarSemMovimento() {
+    setErro(null);
+    try {
+      const { data: r } = await api<{ inativados: number }>('/estoque/inativar-sem-movimento', { metodo: 'POST' });
+      setAviso(`${numero(r.inativados)} produtos sem movimento foram inativados. Eles estao em "Inativos", `
+        + 'onde podem ser ativados de novo a qualquer momento.');
+      setFaixa('');
+      recarregar();
+    } catch (e) {
+      setErro(e instanceof ErroApi ? e.message : 'Nao foi possivel inativar');
+    } finally {
+      setConfirmarInativar(false);
+    }
+  }
+
+  async function definirAtivo(produto: LinhaCobertura, ativo: boolean) {
+    setErro(null);
+    setTrocando(produto.produto_id);
+    try {
+      await api(`/estoque/produtos/${produto.produto_id}/ativo`, { metodo: 'PATCH', corpo: { ativo } });
+      setAviso(`${produto.codigo} ${ativo ? 'ativado: volta ao estoque e ao painel de compras' : 'inativado'}.`);
+      setDetalhe(null);
+      recarregar();
+    } catch (e) {
+      setErro(e instanceof ErroApi ? e.message : 'Nao foi possivel alterar o produto');
+    } finally {
+      setTrocando(null);
+    }
+  }
+
+  const trocarSituacao = (v: 'ativos' | 'inativos') => {
+    setSituacao(v); setFaixa(''); setPagina(1); setAviso(null);
+  };
+  const semMovimento = dados?.resumo.por_faixa.SEM_MOVIMENTO?.produtos ?? 0;
 
   useEffect(() => {
     if (!pode('estoque.movimentar')) return;
@@ -255,8 +296,30 @@ export function Estoque() {
       />
 
       {erro && <Aviso>{erro}</Aviso>}
+      {aviso && <Aviso tipo="ok">{aviso}</Aviso>}
 
-      {dados && <Silo resumo={dados.resumo} faixa={faixa} aoEscolher={escolherFaixa} />}
+      <div className="estoque-situacao">
+        <div className="alternador" role="group" aria-label="Situacao dos produtos">
+          <button type="button" aria-pressed={situacao === 'ativos'} className={situacao === 'ativos' ? 'ativo' : undefined}
+            onClick={() => trocarSituacao('ativos')}>Ativos</button>
+          <button type="button" aria-pressed={situacao === 'inativos'} className={situacao === 'inativos' ? 'ativo' : undefined}
+            onClick={() => trocarSituacao('inativos')}>
+            Inativos{dados ? ` (${numero(dados.resumo.inativos)})` : ''}
+          </button>
+        </div>
+        {situacao === 'ativos' && podeEditar && semMovimento > 0 && (
+          <button type="button" className="botao" onClick={() => setConfirmarInativar(true)}>
+            Inativar sem movimento ({numero(semMovimento)})
+          </button>
+        )}
+        {situacao === 'inativos' && (
+          <span className="fraco">
+            Produtos inativos ficam fora do estoque, do painel de compras e das sugestoes. Ative quando voltar a trabalhar com eles.
+          </span>
+        )}
+      </div>
+
+      {dados && situacao === 'ativos' && <Silo resumo={dados.resumo} faixa={faixa} aoEscolher={escolherFaixa} />}
 
       <Cartao semCorpo>
         <div className="filtros" style={{ padding: '14px 14px 4px' }}>
@@ -291,6 +354,7 @@ export function Estoque() {
                 <th>Cobertura</th>
                 <th className="dir">Em pedido</th>
                 <th className="dir">Valor</th>
+                {situacao === 'inativos' && <th />}
               </tr>
             </thead>
             <tbody>
@@ -319,6 +383,21 @@ export function Estoque() {
                     ) : '—'}
                   </td>
                   <td className="dir num">{l.valor ? moeda(l.valor) : '—'}</td>
+                  {situacao === 'inativos' && (
+                    <td className="dir" style={{ whiteSpace: 'nowrap' }}>
+                      {l.faixa !== 'SEM_MOVIMENTO' && (
+                        <span className="etiqueta etiqueta--alerta" title="Tem saldo ou saida recente" style={{ marginRight: 8 }}>
+                          com movimento
+                        </span>
+                      )}
+                      {podeEditar && (
+                        <button type="button" className="botao botao--pequeno" disabled={trocando === l.produto_id}
+                          onClick={(e) => { e.stopPropagation(); void definirAtivo(l, true); }}>
+                          {trocando === l.produto_id ? 'Ativando…' : 'Ativar'}
+                        </button>
+                      )}
+                    </td>
+                  )}
                 </tr>
               ))}
             </tbody>
@@ -326,26 +405,65 @@ export function Estoque() {
           {carregando && !dados && <div className="carregando">Carregando o estoque…</div>}
           {!carregando && dados && linhas.length === 0 && (
             <Vazio>
-              {faixa || buscaAplicada || curva
-                ? 'Nenhum produto com esses filtros.'
-                : 'Nenhum saldo importado ainda. Use "Importar estoque" com o Rel 9054 do ERP.'}
+              {situacao === 'inativos'
+                ? 'Nenhum produto inativo.'
+                : faixa || buscaAplicada || curva
+                  ? 'Nenhum produto com esses filtros.'
+                  : 'Nenhum saldo importado ainda. Use "Importar estoque" com o Rel 9054 do ERP.'}
             </Vazio>
           )}
         </div>
         <Paginacao meta={meta} aoTrocar={setPagina} />
       </Cartao>
 
+      {confirmarInativar && (
+        <Modal
+          titulo="Inativar produtos sem movimento"
+          aoFechar={() => setConfirmarInativar(false)}
+          rodape={(
+            <>
+              <button type="button" className="botao" onClick={() => setConfirmarInativar(false)}>Cancelar</button>
+              <button type="button" className="botao botao--primario" onClick={() => void inativarSemMovimento()}>
+                Inativar {numero(semMovimento)} produtos
+              </button>
+            </>
+          )}
+        >
+          <p style={{ marginTop: 0 }}>
+            {numero(semMovimento)} produtos estao sem saldo e sem saida (venda ou industrializado) nos ultimos 90 dias.
+          </p>
+          <p>
+            Inativos, eles saem da lista do estoque, do painel de gestao de compras e das sugestoes.
+            O historico de vendas, compras e industrializados continua guardado, e as importacoes
+            seguem reconhecendo o codigo.
+          </p>
+          <p className="fraco" style={{ marginBottom: 0 }}>
+            Para voltar a trabalhar com um deles, abra "Inativos" e clique em "Ativar".
+          </p>
+        </Modal>
+      )}
+
       {detalhe && (
         <Modal
           titulo={`${detalhe.produto.codigo} — ${detalhe.produto.descricao}`}
           aoFechar={() => setDetalhe(null)}
           largo
-          rodape={pode('estoque.movimentar') ? (
-            <button type="button" className="botao botao--primario"
-              onClick={() => { setMovimentando(detalhe.produto); setErroMov(null); setDetalhe(null); }}>
-              Registrar movimentacao
-            </button>
-          ) : undefined}
+          rodape={(
+            <>
+              {podeEditar && (
+                <button type="button" className="botao" disabled={trocando === detalhe.produto.produto_id}
+                  onClick={() => void definirAtivo(detalhe.produto, !detalhe.produto.ativo)}>
+                  {detalhe.produto.ativo ? 'Inativar produto' : 'Ativar produto'}
+                </button>
+              )}
+              {pode('estoque.movimentar') && (
+                <button type="button" className="botao botao--primario"
+                  onClick={() => { setMovimentando(detalhe.produto); setErroMov(null); setDetalhe(null); }}>
+                  Registrar movimentacao
+                </button>
+              )}
+            </>
+          )}
         >
           <p style={{ marginTop: 0 }}>
             <Etiqueta texto={FAIXA[detalhe.produto.faixa].nome}

@@ -8,7 +8,8 @@
  * dias, e as faixas usam o lead time e o estoque minimo das politicas de
  * compra (as mesmas do Painel de Gestao de Compras).
  */
-import { query } from '../../config/database.js';
+import { comTransacao, query, type ContextoSessao } from '../../config/database.js';
+import { naoEncontrado } from '../../core/errors.js';
 
 export const FAIXAS = ['ZERADO', 'CRITICO', 'ATENCAO', 'ADEQUADO', 'EXCESSO', 'SEM_GIRO', 'SEM_MOVIMENTO'] as const;
 export type Faixa = (typeof FAIXAS)[number];
@@ -54,7 +55,7 @@ cfg AS (
   SELECT coalesce((SELECT valor::numeric FROM configuracoes
                     WHERE chave = 'planejamento.limite_excesso_cobertura'), 120) AS excesso
 )
-SELECT p.id AS produto_id, p.codigo, p.descricao, c.nome AS categoria, u.codigo AS unidade,
+SELECT p.id AS produto_id, p.codigo, p.descricao, c.nome AS categoria, u.codigo AS unidade, p.ativo,
        p.classificacao_abc::text AS curva,
        coalesce(s.fisico, 0) AS fisico, coalesce(s.reservado, 0) AS reservado,
        coalesce(s.disponivel, 0) AS disponivel,
@@ -81,10 +82,10 @@ SELECT p.id AS produto_id, p.codigo, p.descricao, c.nome AS categoria, u.codigo 
   LEFT JOIN politicas_compra pp  ON pp.escopo = 'PRODUTO' AND pp.produto_id = p.id
   LEFT JOIN politicas_compra pfo ON pfo.escopo = 'FORNECEDOR' AND pfo.fornecedor_id = f.fornecedor_id
   LEFT JOIN politicas_compra pc  ON pc.escopo = 'CURVA' AND pc.curva = p.classificacao_abc
- WHERE p.deleted_at IS NULL AND p.ativo`;
+ WHERE p.deleted_at IS NULL AND p.ativo = $1`;
 
 interface Linha {
-  produto_id: number; codigo: string; descricao: string; categoria: string; unidade: string;
+  produto_id: number; codigo: string; descricao: string; categoria: string; unidade: string; ativo: boolean;
   curva: string | null; fisico: number; reservado: number; disponivel: number;
   em_pedido: number; chegada: string | null; venda_dia: number | null; ultima_venda: string | null;
   cobertura_dias: number | null; lead_time_dias: number; estoque_minimo_dias: number;
@@ -115,6 +116,8 @@ export interface FiltroCobertura {
   busca?: string | undefined;
   faixa?: Faixa | undefined;
   curva?: string | undefined;
+  /** Ativos (padrao) ou os inativados, para reativar. */
+  situacao?: 'ativos' | 'inativos' | undefined;
   ordenar: 'urgencia' | 'cobertura' | 'valor' | 'venda' | 'codigo';
   pagina: number;
   limite: number;
@@ -122,13 +125,20 @@ export interface FiltroCobertura {
 
 const normalizar = (s: string) => s.normalize('NFD').replace(/[̀-ͯ]/g, '').toUpperCase();
 
-export async function cobertura(filtro: FiltroCobertura) {
-  const { rows } = await query<Linha>(SQL);
-  const todas: LinhaCobertura[] = rows.map((l) => ({
+async function linhas(ativos: boolean): Promise<LinhaCobertura[]> {
+  const { rows } = await query<Linha>(SQL, [ativos]);
+  return rows.map((l) => ({
     ...l,
     faixa: faixaDe(l),
     valor: l.custo !== null ? Math.round(Math.max(l.disponivel, 0) * l.custo * 100) / 100 : null,
   }));
+}
+
+export async function cobertura(filtro: FiltroCobertura) {
+  const inativos = filtro.situacao === 'inativos';
+  const todas = await linhas(!inativos);
+  const { rows: contagem } = await query<{ inativos: number }>(
+    'SELECT count(*)::int AS inativos FROM produtos WHERE deleted_at IS NULL AND NOT ativo');
 
   const busca = filtro.busca ? normalizar(filtro.busca) : null;
   // O resumo ignora o filtro de faixa: a barra mostra sempre o todo.
@@ -167,6 +177,33 @@ export async function cobertura(filtro: FiltroCobertura) {
       valor_total: Math.round(valorTotal * 100) / 100,
       valor_parado: Math.round((porFaixa.SEM_GIRO.valor + porFaixa.EXCESSO.valor) * 100) / 100,
       sem_custo: semFaixa.filter((l) => l.disponivel > 0 && l.custo === null).length,
+      inativos: contagem[0]?.inativos ?? 0,
     },
   };
+}
+
+/**
+ * Inativa todo produto ativo na faixa SEM_MOVIMENTO (sem saldo e sem saida em
+ * 90 dias). Sai do estoque, do painel de compras e das sugestoes; o historico
+ * fica. Reativar e um clique na lista de inativos.
+ */
+export async function inativarSemMovimento(contexto: ContextoSessao) {
+  const alvo = (await linhas(true)).filter((l) => l.faixa === 'SEM_MOVIMENTO').map((l) => l.produto_id);
+  if (!alvo.length) return { inativados: 0 };
+  return comTransacao(contexto, async (cliente) => {
+    const { rowCount } = await cliente.query(
+      `UPDATE produtos SET ativo = false, updated_at = now()
+        WHERE id = ANY($1::bigint[]) AND ativo AND deleted_at IS NULL`, [alvo]);
+    return { inativados: rowCount ?? 0 };
+  });
+}
+
+export async function definirAtivo(produtoId: number, ativo: boolean, contexto: ContextoSessao) {
+  return comTransacao(contexto, async (cliente) => {
+    const { rows } = await cliente.query(
+      `UPDATE produtos SET ativo = $2, updated_at = now()
+        WHERE id = $1 AND deleted_at IS NULL RETURNING id, codigo, ativo`, [produtoId, ativo]);
+    if (!rows[0]) throw naoEncontrado('Produto');
+    return rows[0];
+  });
 }

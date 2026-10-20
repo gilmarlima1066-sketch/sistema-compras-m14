@@ -69,6 +69,7 @@ const coberturaSchema = z.object({
   busca: z.string().trim().max(120).optional(),
   faixa: z.enum(cobertura.FAIXAS).optional(),
   curva: z.enum(['A', 'B', 'C', 'SEM']).optional(),
+  situacao: z.enum(['ativos', 'inativos']).default('ativos'),
   ordenar: z.enum(['urgencia', 'cobertura', 'valor', 'venda', 'codigo']).default('urgencia'),
   pagina: z.coerce.number().int().min(1).default(1),
   limite: z.coerce.number().int().min(1).max(200).default(50),
@@ -81,6 +82,19 @@ estoqueRouter.get('/cobertura', exigirPermissao('estoque.ler'), rota(async (req,
   return ok(res, { linhas: r.linhas, resumo: r.resumo }, 'Cobertura do estoque', metaPaginacao(r.total, {
     pagina: filtro.pagina, limite: filtro.limite, ordem: 'asc',
   }));
+}));
+
+// Produto sem saldo e sem saida em 90 dias sai de cena; volta com um clique.
+estoqueRouter.post('/inativar-sem-movimento', exigirPermissao('produtos.editar'), rota(async (req, res) => {
+  const r = await cobertura.inativarSemMovimento({ usuarioId: req.usuario!.id, ip: req.ipCliente });
+  return ok(res, r, `${r.inativados} produtos sem movimento inativados`);
+}));
+
+estoqueRouter.patch('/produtos/:produto_id/ativo', exigirPermissao('produtos.editar'), rota(async (req, res) => {
+  const { produto_id } = validar(req, 'params', z.object({ produto_id: z.coerce.number().int().positive() }));
+  const { ativo } = validar(req, 'body', z.object({ ativo: z.boolean() }));
+  const r = await cobertura.definirAtivo(produto_id, ativo, { usuarioId: req.usuario!.id, ip: req.ipCliente });
+  return ok(res, r, ativo ? 'Produto ativado' : 'Produto inativado');
 }));
 
 estoqueRouter.get('/criticos', exigirPermissao('estoque.ler'), rota(async (_req, res) => {
