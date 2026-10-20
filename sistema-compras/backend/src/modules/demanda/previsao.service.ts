@@ -110,9 +110,10 @@ async function carregarSeries(
              (l.ultimo_mes - make_interval(months => $1::int))::date AS inicio
         FROM limite l
     ),
+    -- Treina com a saida total (venda + industrializado): e o que precisa ser reposto.
     filtrado AS (
       SELECT m.produto_id, m.mes, m.quantidade
-        FROM mv_demanda_mensal m
+        FROM vw_saida_mensal m
         JOIN produtos p ON p.id = m.produto_id AND p.deleted_at IS NULL
         CROSS JOIN corte c
        WHERE m.mes >= c.inicio AND m.mes <= c.ultimo_mes ${filtro}
@@ -509,9 +510,9 @@ export async function avaliarAcuracidade() {
     realizado AS (
       SELECT p.id,
              p.demanda_prevista,
-             coalesce((SELECT sum(d.quantidade) FROM mv_demanda_diaria d
+             coalesce((SELECT sum(d.quantidade) FROM vw_saida_diaria d
                         WHERE d.produto_id = p.produto_id
-                          AND d.data_venda BETWEEN p.periodo_inicio AND p.periodo_fim), 0) AS realizado
+                          AND d.data BETWEEN p.periodo_inicio AND p.periodo_fim), 0) AS realizado
         FROM pendentes p
     ),
     atualizacao AS (

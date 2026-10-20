@@ -1186,6 +1186,7 @@ function PainelPrevisao({ podeCalcular }: { podeCalcular: boolean }) {
           {resultado && <Aviso tipo="ok">{resultado}</Aviso>}
           {erro && <Aviso>{erro}</Aviso>}
           <p className="fraco">
+            A previsao usa a saida mensal (venda + industrializado), que e o que precisa ser reposto.
             A previsao anterior nao e sobrescrita: cada execucao grava uma nova versao, para que o
             acerto de cada metodo possa ser conferido depois.
           </p>
@@ -1321,6 +1322,10 @@ function PainelSazonalidade({ podeCalcular }: { podeCalcular: boolean }) {
       semCorpo
     >
       {aviso && <Aviso tipo="ok">{aviso}</Aviso>}
+      <p className="fraco" style={{ margin: 0, padding: '10px 14px 0' }}>
+        Indices calculados sobre a saida mensal (venda + industrializado). Depois de importar
+        industrializados, use "Recalcular" para atualizar.
+      </p>
       {carregando && <Vazio>Carregando…</Vazio>}
       {!carregando && !itens.length && (
         <Vazio>Nenhum produto com historico suficiente para afirmar sazonalidade.</Vazio>
@@ -1412,7 +1417,7 @@ function PainelAbcXyz({ podeCalcular }: { podeCalcular: boolean }) {
           <Aviso>
             Nenhum produto foi classificado ainda.
             {podeCalcular
-              ? ' Use "Reclassificar" para calcular as curvas ABC e XYZ com as vendas dos ultimos 365 dias.'
+              ? ' Use "Reclassificar" para calcular as curvas com os ultimos 365 dias: ABC pelo faturamento, XYZ pela saida (venda + industrializado).'
               : ' Peca a quem tem permissao de previsao para calcular as curvas.'}
           </Aviso>
         )}
@@ -1428,7 +1433,7 @@ function PainelAbcXyz({ podeCalcular }: { podeCalcular: boolean }) {
               }}
             />
             <p className="fraco">
-              Linhas: curva ABC (faturamento). Colunas: curva XYZ (regularidade da demanda).
+              Linhas: curva ABC (faturamento). Colunas: curva XYZ (regularidade da saida mensal: venda + industrializado).
               AX concentra os itens que mais faturam e sao mais previsiveis; CZ, o oposto.
             </p>
           </>

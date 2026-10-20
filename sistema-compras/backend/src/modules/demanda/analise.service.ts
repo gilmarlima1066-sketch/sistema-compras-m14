@@ -47,8 +47,9 @@ export async function calcularSazonalidade(produtoId?: number) {
              END AS ultimo_mes
         FROM mv_demanda_diaria
     ),
+    -- Sazonalidade da saida total (venda + industrializado).
     fechado AS (
-      SELECT m.* FROM mv_demanda_mensal m CROSS JOIN limite l WHERE m.mes <= l.ultimo_mes
+      SELECT m.* FROM vw_saida_mensal m CROSS JOIN limite l WHERE m.mes <= l.ultimo_mes
     ),
     elegivel AS (
       SELECT produto_id, count(*) AS meses_historico
@@ -172,7 +173,7 @@ export async function sazonalidadeProduto(produtoId: number) {
   if (!rows.length) {
     const config = await carregarConfig();
     const { rows: hist } = await query<{ meses: number }>(
-      'SELECT count(*)::int AS meses FROM mv_demanda_mensal WHERE produto_id = $1', [produtoId]);
+      'SELECT count(*)::int AS meses FROM vw_saida_mensal WHERE produto_id = $1', [produtoId]);
     return {
       produto_id: produtoId,
       indices: [],
@@ -182,7 +183,7 @@ export async function sazonalidadeProduto(produtoId: number) {
   }
   const serieAnual = await query(`
     SELECT extract(year FROM mes)::int AS ano, extract(month FROM mes)::int AS mes, quantidade
-      FROM mv_demanda_mensal WHERE produto_id = $1 ORDER BY mes`, [produtoId]);
+      FROM vw_saida_mensal WHERE produto_id = $1 ORDER BY mes`, [produtoId]);
 
   return {
     produto_id: produtoId,
@@ -536,10 +537,11 @@ export async function classificarAbcXyz(dias: number, contexto: ContextoSessao) 
                   ELSE 'C' END::classificacao_abc_enum AS classe
         FROM acumulado
     ),
+    -- XYZ mede a regularidade da saida total; ABC (acima) segue por faturamento.
     mensal AS (
       SELECT m.produto_id, avg(m.quantidade) AS media, stddev_samp(m.quantidade) AS desvio,
              count(*) AS meses
-        FROM mv_demanda_mensal m, janela j
+        FROM vw_saida_mensal m, janela j
        WHERE m.mes >= date_trunc('month', j.inicio)
        GROUP BY m.produto_id
     ),
@@ -631,7 +633,7 @@ export async function demandaIrregular(filtro: Paginacao) {
            CASE WHEN avg(m.quantidade) > 0
                 THEN stddev_samp(m.quantidade) / avg(m.quantidade) END AS coeficiente_variacao,
            p.classificacao_xyz
-      FROM mv_demanda_mensal m
+      FROM vw_saida_mensal m
       JOIN produtos p ON p.id = m.produto_id AND p.deleted_at IS NULL
      GROUP BY m.produto_id, p.codigo, p.descricao, p.classificacao_xyz
     HAVING count(*) >= 6 AND avg(m.quantidade) > 0
@@ -692,7 +694,7 @@ export async function alertasDemanda(filtro: FiltroPeriodo) {
             WHERE u.created_at < now() - make_interval(days => $1::int)`, [config.diasDesatualizada]),
     query(`SELECT count(*)::int AS total FROM produtos p
             WHERE p.deleted_at IS NULL
-              AND (SELECT count(*) FROM mv_demanda_mensal m WHERE m.produto_id = p.id) < $1`,
+              AND (SELECT count(*) FROM vw_saida_mensal m WHERE m.produto_id = p.id) < $1`,
       [config.mesesMinimos]),
     query(`SELECT count(*)::int AS total FROM previsoes_demanda
             WHERE avaliado_em IS NOT NULL AND abs(erro_percentual) > 50`),

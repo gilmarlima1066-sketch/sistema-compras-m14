@@ -121,19 +121,21 @@ export async function recalcularParametros(
 
   const { rows } = await query<{ atualizados: number }>(`
     WITH referencia AS (SELECT max(data_venda) AS fim FROM mv_demanda_diaria),
+    -- Media e desvio da saida total (venda + industrializado): base do estoque
+    -- de seguranca e do ponto de pedido.
     diaria AS (
       SELECT d.produto_id,
              avg(d.quantidade)          AS media,
              stddev_samp(d.quantidade)  AS desvio,
              count(*)                   AS dias_com_venda
-        FROM mv_demanda_diaria d, referencia r
-       WHERE d.data_venda > r.fim - $1::int
+        FROM vw_saida_diaria d, referencia r
+       WHERE d.data > r.fim - $1::int
        GROUP BY d.produto_id
     ),
     total AS (
       SELECT d.produto_id, sum(d.quantidade) / $1::numeric AS diaria_corrida
-        FROM mv_demanda_diaria d, referencia r
-       WHERE d.data_venda > r.fim - $1::int
+        FROM vw_saida_diaria d, referencia r
+       WHERE d.data > r.fim - $1::int
        GROUP BY d.produto_id
     ),
     forn AS (

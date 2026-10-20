@@ -100,10 +100,11 @@ previsao AS (
    ORDER BY produto_id, periodo_inicio DESC, versao DESC
 ),
 referencia AS (SELECT max(data_venda) AS fim FROM mv_demanda_diaria),
+-- Saida total (venda + industrializado) dos ultimos 90 dias
 media AS (
   SELECT d.produto_id, sum(d.quantidade) / 90.0 AS diaria
-    FROM mv_demanda_diaria d, referencia r
-   WHERE d.data_venda > r.fim - 90
+    FROM vw_saida_diaria d, referencia r
+   WHERE d.data > r.fim - 90
    GROUP BY d.produto_id
 ),
 -- Compras ja confirmadas: so o saldo pendente conta como entrada futura (secao 21)
