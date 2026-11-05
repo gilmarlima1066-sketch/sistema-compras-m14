@@ -13,6 +13,7 @@ import * as simulacao from './simulacao.service.js';
 import * as requisicao from './requisicao.service.js';
 import * as painel from './painel.service.js';
 import * as historico from './historico.service.js';
+import * as orcamento from './orcamento.service.js';
 import {
   ajustarNecessidadeSchema, alcadaSchema, calendarioComprasSchema,
   compararSimulacoesSchema, criarRequisicaoSchema, decidirNecessidadeSchema,
@@ -38,6 +39,87 @@ const contexto = (req: { usuario?: { id: number }; ip?: string }) => ({
 
 const idParam = z.object({ id: z.coerce.number().int().positive() });
 const planejamentoQuery = z.object({ planejamento_id: z.coerce.number().int().positive().optional() });
+
+// --- Orcamento para fornecedor (PDF pelo WhatsApp) ---------------------------
+
+const ORCAR = exigirPermissao('compras.requisitar');
+const num = (max = 1e9) => z.coerce.number().min(0).max(max);
+const itemOrcamentoSchema = z.object({
+  produto_id: z.coerce.number().int().positive().nullish(),
+  produto_codigo: z.string().trim().min(1).max(40),
+  descricao: z.string().trim().min(1).max(300),
+  unidade: z.string().trim().max(10).nullish(),
+  quantidade: z.coerce.number().positive().max(1e9),
+  preco_unitario: num(),
+  desconto: num().default(0),
+  st_valor: num().default(0),
+  ipi_pct: num(100).default(0),
+  icms_pct: num(100).default(0),
+  pis_pct: num(100).default(0),
+  cofins_pct: num(100).default(0),
+});
+const orcamentoSchema = z.object({
+  fornecedor_id: z.coerce.number().int().positive().nullish(),
+  fornecedor: z.record(z.unknown()).refine((f) => typeof f.nome === 'string' && f.nome.trim() !== '',
+    { message: 'Informe o fornecedor' }),
+  data_emissao: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  tipo_operacao: z.string().trim().min(1).max(60).default('COMPRAS'),
+  condicao_pagamento: z.string().trim().max(120).nullish(),
+  data_entrega: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullish().or(z.literal('').transform(() => null)),
+  transportadora: z.string().trim().max(120).nullish(),
+  observacoes: z.string().trim().max(2000).nullish(),
+  desconto: num().default(0),
+  frete: num().default(0),
+  comprador: z.string().trim().max(120).nullish(),
+  itens: z.array(itemOrcamentoSchema).min(1, 'Inclua ao menos um produto').max(300),
+});
+
+planejamentoRouter.get('/orcamentos/empresa', LER, rota(async (_req, res) =>
+  ok(res, await orcamento.empresa(), 'Dados da empresa para o orcamento')));
+
+planejamentoRouter.get('/orcamentos/produtos', LER, rota(async (req, res) => {
+  const { q, fornecedor_id } = validar(req, 'query', z.object({
+    q: z.string().trim().min(1).max(80),
+    fornecedor_id: z.coerce.number().int().positive().optional(),
+  }));
+  return ok(res, await orcamento.buscarProdutos(q, fornecedor_id), 'Produtos com preco e impostos sugeridos');
+}));
+
+planejamentoRouter.get('/orcamentos', LER, rota(async (req, res) => {
+  const filtro = validar(req, 'query', z.object({
+    busca: z.string().trim().max(120).optional(),
+    pagina: z.coerce.number().int().min(1).default(1),
+    limite: z.coerce.number().int().min(1).max(100).default(25),
+  }));
+  const { itens, meta } = await orcamento.listar(filtro);
+  return ok(res, itens, 'Orcamentos', meta);
+}));
+
+planejamentoRouter.get('/orcamentos/:id', LER, rota(async (req, res) => {
+  const { id } = validar(req, 'params', idParam);
+  return ok(res, await orcamento.obter(id), 'Orcamento');
+}));
+
+planejamentoRouter.post('/orcamentos', ORCAR, rota(async (req, res) => {
+  const dados = validar(req, 'body', orcamentoSchema);
+  return criado(res, await orcamento.salvar(null, dados, contexto(req)), 'Orcamento salvo');
+}));
+
+planejamentoRouter.put('/orcamentos/:id', ORCAR, rota(async (req, res) => {
+  const { id } = validar(req, 'params', idParam);
+  const dados = validar(req, 'body', orcamentoSchema);
+  return ok(res, await orcamento.salvar(id, dados, contexto(req)), 'Orcamento atualizado');
+}));
+
+planejamentoRouter.post('/orcamentos/:id/enviado', ORCAR, rota(async (req, res) => {
+  const { id } = validar(req, 'params', idParam);
+  return ok(res, await orcamento.marcarEnviado(id, contexto(req)), 'Orcamento marcado como enviado');
+}));
+
+planejamentoRouter.delete('/orcamentos/:id', ORCAR, rota(async (req, res) => {
+  const { id } = validar(req, 'params', idParam);
+  return ok(res, await orcamento.excluir(id, contexto(req)), 'Orcamento excluido');
+}));
 
 // --- Historico de compras (entradas importadas do ERP) -----------------------
 

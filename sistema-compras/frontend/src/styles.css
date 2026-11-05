@@ -1129,3 +1129,47 @@ button.ranking__linha:focus-visible, button.divergente__linha:focus-visible { ou
 /* --- estoque: ativos x inativos ------------------------------------------ */
 .estoque-situacao { display: flex; align-items: center; gap: 10px 16px; flex-wrap: wrap; margin-bottom: 14px; }
 .estoque-situacao .fraco { font-size: 13px; }
+
+/* --- orcamento para fornecedor ------------------------------------------- */
+.orc { display: grid; gap: 14px; grid-template-columns: minmax(0, 1fr); }
+.orc-barra { display: flex; align-items: center; gap: 10px 14px; flex-wrap: wrap; }
+.orc-barra h3 { font-size: 17px; }
+.orc-barra__acoes { margin-left: auto; display: flex; gap: 8px; flex-wrap: wrap; }
+.botao--whatsapp { background: #1f7a45; border-color: #1f7a45; }
+.botao--whatsapp:hover:not(:disabled) { background: #186338; border-color: #186338; }
+.orc .busca-historico { margin-bottom: 12px; }
+.orc .busca-historico__campo { width: 100%; }
+.orc-grade { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px 12px; }
+.orc-grade--2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.orc-grade .campo { margin: 0; min-width: 0; }
+.orc-col-2 { grid-column: span 2; }
+.orc-campo {
+  width: 100%; min-width: 0; height: 30px; padding: 0 6px; font: inherit; font-size: 13px;
+  border: 1px solid var(--borda); border-radius: 5px; background: var(--superficie);
+  font-variant-numeric: tabular-nums;
+}
+.orc-campo:focus { outline: 2px solid var(--acento); outline-offset: -1px; border-color: var(--acento); }
+.orc-campo:disabled { background: transparent; border-color: transparent; color: var(--texto); }
+.orc-campo--curto { width: 62px; text-align: right; }
+.orc-campo--medio { width: 84px; text-align: right; }
+.orc-campo--pct { width: 50px; text-align: right; }
+.orc-campo--unid { width: 44px; text-align: center; }
+.orc-campo--descricao { min-width: 220px; }
+.orc-itens .tabela td, .orc-itens .tabela th { padding: 5px 4px; vertical-align: middle; white-space: nowrap; }
+.orc-itens .tabela td:nth-child(2) { width: 100%; }
+.orc-rodape { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(280px, 1fr); gap: 14px; align-items: start; }
+.orc-observacoes {
+  width: 100%; font: inherit; font-size: 13.5px; padding: 8px 10px; resize: vertical;
+  border: 1px solid var(--borda-forte); border-radius: var(--raio); background: var(--superficie);
+}
+.orc-totais { display: grid; grid-template-columns: 1fr auto; gap: 6px 16px; margin: 0; align-items: center; }
+.orc-totais dt { color: var(--texto-2); font-size: 13.5px; }
+.orc-totais dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; }
+.orc-totais__forte { font-weight: 600; color: var(--texto) !important; border-top: 1px solid var(--borda); padding-top: 6px; }
+.orc-totais__pedido { font-size: 17px; font-weight: 700; color: var(--acento-forte) !important; padding-top: 4px; }
+@media (max-width: 900px) {
+  .orc-grade { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .orc-rodape { grid-template-columns: minmax(0, 1fr); }
+  .orc-barra__acoes { margin-left: 0; width: 100%; }
+  .orc-barra__acoes .botao { flex: 1; }
+}
